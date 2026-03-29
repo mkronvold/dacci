@@ -1,0 +1,21 @@
+{
+  "name": "@dacci/content-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@dacci/shared-types": "*",
+    "jszip": "^3.10.1",
+    "yaml": "^2.8.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/**/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

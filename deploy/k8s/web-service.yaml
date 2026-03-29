@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dacci-web
+spec:
+  selector:
+    app: dacci-web
+  ports:
+    - name: http
+      port: 4173
+      targetPort: http

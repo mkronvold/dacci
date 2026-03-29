@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+repo_root="$(CDPATH= cd -- "${script_dir}/.." >/dev/null && pwd)"
+
+docker compose -f "${repo_root}/deploy/docker/compose.yaml" down

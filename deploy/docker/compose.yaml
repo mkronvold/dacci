@@ -1,0 +1,64 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATA_ROOT: /workspace/data
+      GIT_SYNC_REPO_ROOT: /workspace
+      GIT_SSH_COMMAND: ssh -i /var/run/dacci-git/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/run/dacci-git/known_hosts
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${DACCI_CONTENT_ROOT:-../../../E2Open.KPE.Content}
+        target: /workspace
+      - type: bind
+        source: ${DACCI_CONTENT_ROOT:-../../../E2Open.KPE.Content}/data
+        target: /workspace/data
+      - type: bind
+        source: ${DACCI_GIT_SSH_DIR:-./git-ssh}
+        target: /var/run/dacci-git
+        read_only: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/ready').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/web.Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4173
+      WEB_API_BASE_URL: http://localhost:3000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "4173:4173"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4173/ready').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

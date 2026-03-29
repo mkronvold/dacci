@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dacci
+resources:
+  - ../../k8s
+images:
+  - name: dacci-api
+    newName: ghcr.io/example/dacci-api
+    newTag: 0.1.0
+  - name: dacci-web
+    newName: ghcr.io/example/dacci-web
+    newTag: 0.1.0
+patches:
+  - target:
+      kind: PersistentVolumeClaim
+      name: dacci-workspace
+    patch: |-
+      # The workspace PVC is treated as content-repo storage; app code stays in the image.
+      - op: add
+        path: /spec/storageClassName
+        value: fast-ssd
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 20Gi
+  - target:
+      kind: ConfigMap
+      name: dacci-api-runtime
+    patch: |-
+      - op: replace
+        path: /data/GIT_SYNC_RELEASE_BRANCH
+        value: main
+  - target:
+      kind: Ingress
+      name: dacci
+    patch: |-
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: dacci.example.com
+      - op: replace
+        path: /spec/rules/0/host
+        value: dacci.example.com
+      - op: replace
+        path: /spec/tls/0/secretName
+        value: dacci-example-com-tls

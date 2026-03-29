@@ -1,0 +1,22 @@
+{
+  "name": "@dacci/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dacci": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@dacci/content-engine": "*",
+    "@dacci/github-sync": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.4.0",
+    "typescript": "^5.8.2"
+  }
+}

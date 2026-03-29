@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+.git/
+.copilot/
+data/**/*.md
+init.md~

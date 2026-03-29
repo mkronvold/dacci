@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dacci-api-runtime
+data:
+  HOST: 0.0.0.0
+  PORT: "3000"
+  # /workspace is the mounted content-repository checkout; app code lives in the image.
+  DATA_ROOT: /workspace/data
+  GIT_SYNC_REPO_ROOT: /workspace
+  GIT_SYNC_REMOTE_NAME: origin
+  GIT_SYNC_RELEASE_BRANCH: default

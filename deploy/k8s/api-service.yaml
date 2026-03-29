@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dacci-api
+spec:
+  selector:
+    app: dacci-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

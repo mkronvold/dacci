@@ -1,0 +1,28 @@
+{
+  "name": "dacci",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @dacci/shared-types && npm run build --workspace @dacci/content-engine && npm run build --workspace @dacci/github-sync && npm run build --workspace @dacci/api && npm run build --workspace @dacci/web && npm run build --workspace @dacci/cli",
+    "build:cli": "npm run build --workspace @dacci/shared-types && npm run build --workspace @dacci/content-engine && npm run build --workspace @dacci/github-sync && npm run build --workspace @dacci/cli",
+    "test": "npm run build && npm run test --workspace @dacci/content-engine && npm run test --workspace @dacci/github-sync && npm run test --workspace @dacci/api && npm run test --workspace @dacci/cli",
+    "typecheck": "npm run typecheck --workspace @dacci/shared-types && npm run typecheck --workspace @dacci/content-engine && npm run typecheck --workspace @dacci/github-sync && npm run typecheck --workspace @dacci/api && npm run typecheck --workspace @dacci/web && npm run typecheck --workspace @dacci/cli",
+    "dev": "concurrently --kill-others-on-fail -n api,web -c blue,green \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "npm run dev --workspace @dacci/api",
+    "dev:web": "npm run dev --workspace @dacci/web",
+    "cli": "node scripts/run-cli.mjs",
+    "docker:config": "docker compose -f deploy/docker/compose.yaml config",
+    "docker:up": "docker compose -f deploy/docker/compose.yaml up --build",
+    "docker:down": "docker compose -f deploy/docker/compose.yaml down",
+    "k8s:render": "kubectl kustomize deploy/k8s",
+    "k8s:validate": "kubectl apply --dry-run=client -k deploy/k8s"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.8.2"
+  }
+}

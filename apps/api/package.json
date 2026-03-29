@@ -1,0 +1,25 @@
+{
+  "name": "@dacci/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@dacci/content-engine": "*",
+    "@dacci/github-sync": "*",
+    "@dacci/shared-types": "*",
+    "@fastify/cors": "^11.1.0",
+    "fastify": "^5.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.4.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+repo_root="$(CDPATH= cd -- "${script_dir}/.." >/dev/null && pwd)"
+default_split_root="$(cd -- "${repo_root}/.." && pwd)/E2Open.KPE.Content"
+
+content_root="${DACCI_CONTENT_ROOT:-${DACCI_WORKSPACE_ROOT:-}}"
+if [[ -z "${content_root}" ]]; then
+  if [[ -d "${default_split_root}/.git" && -d "${default_split_root}/data" ]]; then
+    content_root="${default_split_root}"
+  else
+    printf 'scripts/up: set DACCI_CONTENT_ROOT or clone ../E2Open.KPE.Content beside this repo\n' >&2
+    exit 1
+  fi
+fi
+
+DACCI_CONTENT_ROOT="${content_root}" \
+DACCI_GIT_SSH_DIR="${DACCI_GIT_SSH_DIR:-${HOME}/.ssh}" \
+docker compose -f "${repo_root}/deploy/docker/compose.yaml" up --build -d

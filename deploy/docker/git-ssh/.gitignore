@@ -1,0 +1,4 @@
+# Drop id_ed25519 and known_hosts here for Docker Git SSH access.
+# Compose mounts this directory at /var/run/dacci-git in the api container.
+*
+!.gitignore

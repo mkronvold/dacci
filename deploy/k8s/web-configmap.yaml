@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dacci-web-runtime
+data:
+  HOST: 0.0.0.0
+  PORT: "4173"
+  WEB_API_BASE_URL: /
