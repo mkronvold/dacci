@@ -28,6 +28,20 @@ interface ViewerHeaderProps {
 
 export function ViewerHeader(props: ViewerHeaderProps) {
   const changeLabel = `${props.changeCount} ${props.changeCount === 1 ? "change" : "changes"}`;
+  const moveButtonClassName = props.activeTool === "move" ? "toggle-button tone-bright" : "toggle-button tone-neutral";
+  const hiddenButtonClassName = !props.hasFrontMatter
+    ? "toggle-button tone-dim viewer-hidden-toggle"
+    : props.showHidden
+      ? "toggle-button tone-bright viewer-hidden-toggle"
+      : "toggle-button tone-neutral viewer-hidden-toggle";
+  const tagButtonClassName = props.showTags
+    ? "toggle-button tone-bright viewer-tag-toggle"
+    : props.hasTags
+      ? "toggle-button tone-neutral viewer-tag-toggle"
+      : "toggle-button tone-dim viewer-tag-toggle";
+  const outlineButtonClassName = props.outlineOpen
+    ? "toggle-button tone-bright viewer-outline-toggle"
+    : "toggle-button tone-neutral viewer-outline-toggle";
 
   return (
     <header className="viewer-header">
@@ -57,12 +71,12 @@ export function ViewerHeader(props: ViewerHeaderProps) {
         </button>
         <button
           aria-pressed={props.activeTool === "move"}
-          className="ghost-button"
+          className={moveButtonClassName}
           disabled={props.busy}
           onClick={props.onToggleMove}
           type="button"
         >
-          {props.activeTool === "move" ? "Hide move" : "Move"}
+          Move
         </button>
         <button className="ghost-button danger" disabled={props.busy} onClick={props.onDelete} type="button">
           Delete
@@ -91,32 +105,32 @@ export function ViewerHeader(props: ViewerHeaderProps) {
           {props.showHiddenToggle ? (
             <button
               aria-pressed={props.showHidden}
-              className="ghost-button viewer-hidden-toggle"
+              className={hiddenButtonClassName}
               disabled={!props.hasFrontMatter}
               onClick={props.onToggleHidden}
               type="button"
             >
-              {props.showHidden ? "Hide Hidden" : "Show Hidden"}
+              Header
             </button>
           ) : null}
           {props.showTagToggle ? (
             <button
               aria-pressed={props.showTags}
-              className={props.hasTags ? "primary-button viewer-tag-toggle" : "ghost-button viewer-tag-toggle"}
+              className={tagButtonClassName}
               onClick={props.onToggleTags}
               type="button"
             >
-              {props.showTags ? "Hide Tags" : "Show Tags"}
+              Tags
             </button>
           ) : null}
           {props.showOutlineToggle ? (
             <button
               aria-pressed={props.outlineOpen}
-              className="ghost-button viewer-outline-toggle"
+              className={outlineButtonClassName}
               onClick={props.onToggleOutline}
               type="button"
             >
-              {props.outlineOpen ? "Hide Outline" : "Show Outline"}
+              Outline
             </button>
           ) : null}
         </div>

@@ -34,6 +34,8 @@ import type {
 } from "@dacci/shared-types";
 
 import { DocumentEditor } from "./components/DocumentEditor";
+import { DocumentOutlinePane } from "./components/DocumentOutlinePane";
+import { LibraryPane } from "./components/LibraryPane";
 import { ManagementPane } from "./components/ManagementPane";
 import { MarkdownViewer, readOutlineOpenState, writeOutlineOpenState } from "./components/MarkdownViewer";
 import { NavigationPane } from "./components/NavigationPane";
@@ -50,6 +52,7 @@ import {
 
 const defaultApiBaseUrl = "http://localhost:3000";
 const navigationTreeStateStorageKeyPrefix = "dacci.navigation.collapsed";
+const uiToggleStateStorageKeyPrefix = "dacci.ui.toggles";
 
 interface AppProps {
   apiBaseUrl?: string;
@@ -103,7 +106,79 @@ type SyncScheduleFormState = {
 type DocumentMode = "view" | "edit";
 
 type ActiveDocumentTool = "rename" | "move" | null;
-type OpenSidePanel = "manage" | "sync" | null;
+type OpenSidePanel = "manage" | "library" | "sync" | null;
+type PersistedUiToggleState = {
+  navigationPaneOpen: boolean;
+  openSidePanel: OpenSidePanel;
+  showDocuments: boolean;
+  showTags: boolean;
+  showHidden: boolean;
+  outlineOpen: boolean;
+};
+
+function isOpenSidePanel(value: unknown): value is OpenSidePanel {
+  return value === null || value === "manage" || value === "library" || value === "sync";
+}
+
+function buildUiToggleStateStorageKey(apiBaseUrl: string): string {
+  return `${uiToggleStateStorageKeyPrefix}:${apiBaseUrl}`;
+}
+
+function readPersistedUiToggleState(apiBaseUrl: string): PersistedUiToggleState {
+  const defaultState: PersistedUiToggleState = {
+    navigationPaneOpen: true,
+    openSidePanel: null,
+    showDocuments: true,
+    showTags: false,
+    showHidden: false,
+    outlineOpen: readOutlineOpenState(apiBaseUrl),
+  };
+
+  if (typeof window === "undefined") {
+    return defaultState;
+  }
+
+  const rawValue = window.localStorage.getItem(buildUiToggleStateStorageKey(apiBaseUrl));
+  if (rawValue === null) {
+    return defaultState;
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue) as unknown;
+    if (!parsedValue || typeof parsedValue !== "object") {
+      console.warn("Ignoring invalid saved UI toggle state from localStorage.");
+      return defaultState;
+    }
+
+    const candidate = parsedValue as Record<string, unknown>;
+    return {
+      navigationPaneOpen:
+        typeof candidate.navigationPaneOpen === "boolean"
+          ? candidate.navigationPaneOpen
+          : defaultState.navigationPaneOpen,
+      openSidePanel: isOpenSidePanel(candidate.openSidePanel) ? candidate.openSidePanel : defaultState.openSidePanel,
+      showDocuments: typeof candidate.showDocuments === "boolean" ? candidate.showDocuments : defaultState.showDocuments,
+      showTags: typeof candidate.showTags === "boolean" ? candidate.showTags : defaultState.showTags,
+      showHidden: typeof candidate.showHidden === "boolean" ? candidate.showHidden : defaultState.showHidden,
+      outlineOpen: typeof candidate.outlineOpen === "boolean" ? candidate.outlineOpen : defaultState.outlineOpen,
+    };
+  } catch (error) {
+    console.warn("Failed to read saved UI toggle state from localStorage.", error);
+    return defaultState;
+  }
+}
+
+function writePersistedUiToggleState(apiBaseUrl: string, state: PersistedUiToggleState): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(buildUiToggleStateStorageKey(apiBaseUrl), JSON.stringify(state));
+  } catch (error) {
+    console.warn("Failed to save UI toggle state to localStorage.", error);
+  }
+}
 
 function buildNavigationTreeStateStorageKey(apiBaseUrl: string): string {
   return `${navigationTreeStateStorageKeyPrefix}:${apiBaseUrl}`;
@@ -309,6 +384,7 @@ function buildApiUrl(apiBaseUrl: string, resource: string): string {
 
 export function App(props: AppProps) {
   const apiBaseUrl = props.apiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl;
+  const persistedUiToggleState = useMemo(() => readPersistedUiToggleState(apiBaseUrl), [apiBaseUrl]);
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [syncStatus, setSyncStatus] = useState<GitSyncStatus | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -317,7 +393,8 @@ export function App(props: AppProps) {
   const [selectedDocument, setSelectedDocument] = useState<ContentDocument | null>(null);
   const [selectedDocumentDraft, setSelectedDocumentDraft] = useState("");
   const [documentMode, setDocumentMode] = useState<DocumentMode>("view");
-  const [openSidePanel, setOpenSidePanel] = useState<OpenSidePanel>(null);
+  const [navigationPaneOpen, setNavigationPaneOpen] = useState(persistedUiToggleState.navigationPaneOpen);
+  const [openSidePanel, setOpenSidePanel] = useState<OpenSidePanel>(persistedUiToggleState.openSidePanel);
   const [activeDocumentTool, setActiveDocumentTool] = useState<ActiveDocumentTool>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -350,7 +427,7 @@ export function App(props: AppProps) {
   const [collapsedTreePaths, setCollapsedTreePaths] = useState<Set<string>>(() =>
     readCollapsedTreePaths(apiBaseUrl),
   );
-  const [showDocuments, setShowDocuments] = useState(true);
+  const [showDocuments, setShowDocuments] = useState(persistedUiToggleState.showDocuments);
   const [importForm, setImportForm] = useState<ImportFormState>({
     format: "documents",
     topicName: "",
@@ -372,11 +449,16 @@ export function App(props: AppProps) {
     enabled: false,
     intervalMinutes: "15",
   });
-  const [outlineOpen, setOutlineOpen] = useState(() => readOutlineOpenState(apiBaseUrl));
-  const [showTags, setShowTags] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(persistedUiToggleState.outlineOpen);
+  const [showTags, setShowTags] = useState(persistedUiToggleState.showTags);
+  const [showHidden, setShowHidden] = useState(persistedUiToggleState.showHidden);
+  const heroCardRef = useRef<HTMLElement | null>(null);
+  const navigationPaneRef = useRef<HTMLElement | null>(null);
   const viewerPanelRef = useRef<HTMLElement | null>(null);
+  const sidePanelShellRef = useRef<HTMLElement | null>(null);
   const documentEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const previousNavigationPaneOpenRef = useRef(navigationPaneOpen);
+  const previousOpenSidePanelRef = useRef<OpenSidePanel>(null);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
 
   const topicOptions = tree?.topics ?? [];
@@ -412,13 +494,23 @@ export function App(props: AppProps) {
     return syncStatus.changedFiles.some((change) => candidatePaths.has(normalizeRepoPath(change.path)));
   }, [selectedDocument, syncStatus]);
   const managementPaneOpen = openSidePanel === "manage";
+  const libraryPaneOpen = openSidePanel === "library";
   const syncPaneOpen = openSidePanel === "sync";
   const hasOpenSidePanel = openSidePanel !== null;
   const contentChangeCount = syncStatus?.changedFiles.length ?? 0;
   const showOutlineToggle = documentMode === "view" && selectedDocumentHeadings.length > 1;
   const showTagToggle = documentMode === "view";
   const showHiddenToggle = documentMode === "view";
+  const showDocumentOutline = documentMode === "view" && outlineOpen && selectedDocumentHeadings.length > 1;
+  const showExternalOutline = navigationPaneOpen && showDocumentOutline;
   const selectedDocumentHasFrontMatter = selectedDocumentFrontMatterBlock !== null;
+  const workspaceShellClassName = [
+    "workspace-shell",
+    showExternalOutline ? "with-document-outline" : "",
+    navigationPaneOpen ? "" : "without-navigation",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const loadDocumentAtPath = useCallback(
     async (documentPath: string) => {
@@ -523,6 +615,15 @@ export function App(props: AppProps) {
       intervalMinutes: String(scheduler.intervalMinutes),
     });
   }, [syncStatus?.scheduler?.enabled, syncStatus?.scheduler?.intervalMinutes]);
+
+  useEffect(() => {
+    setNavigationPaneOpen(persistedUiToggleState.navigationPaneOpen);
+    setOpenSidePanel(persistedUiToggleState.openSidePanel);
+    setShowDocuments(persistedUiToggleState.showDocuments);
+    setShowTags(persistedUiToggleState.showTags);
+    setShowHidden(persistedUiToggleState.showHidden);
+    setOutlineOpen(persistedUiToggleState.outlineOpen);
+  }, [persistedUiToggleState]);
 
   useEffect(() => {
     if (!selectedDocumentPath) {
@@ -1361,6 +1462,10 @@ export function App(props: AppProps) {
     setOpenSidePanel((current) => (current === "manage" ? null : "manage"));
   }, []);
 
+  const handleToggleLibraryPane = useCallback(() => {
+    setOpenSidePanel((current) => (current === "library" ? null : "library"));
+  }, []);
+
   const handleToggleSyncPane = useCallback(() => {
     setOpenSidePanel((current) => (current === "sync" ? null : "sync"));
   }, []);
@@ -1415,12 +1520,19 @@ export function App(props: AppProps) {
   }, [documentMode, selectedDocumentPath]);
 
   useEffect(() => {
-    setOutlineOpen(readOutlineOpenState(apiBaseUrl));
-  }, [apiBaseUrl]);
-
-  useEffect(() => {
     writeOutlineOpenState(apiBaseUrl, outlineOpen);
   }, [apiBaseUrl, outlineOpen]);
+
+  useEffect(() => {
+    writePersistedUiToggleState(apiBaseUrl, {
+      navigationPaneOpen,
+      openSidePanel,
+      showDocuments,
+      showTags,
+      showHidden,
+      outlineOpen,
+    });
+  }, [apiBaseUrl, navigationPaneOpen, openSidePanel, showDocuments, showTags, showHidden, outlineOpen]);
 
   useEffect(() => {
     if (!selectedDocumentHasFrontMatter && showHidden) {
@@ -1428,21 +1540,86 @@ export function App(props: AppProps) {
     }
   }, [selectedDocumentHasFrontMatter, showHidden]);
 
+  useEffect(() => {
+    const previousPanel = previousOpenSidePanelRef.current;
+    if (previousPanel === openSidePanel) {
+      return;
+    }
+
+    previousOpenSidePanelRef.current = openSidePanel;
+
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 1380px)").matches) {
+      return;
+    }
+
+    const targetElement = openSidePanel ? sidePanelShellRef.current : previousPanel ? heroCardRef.current : null;
+    if (!targetElement) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [openSidePanel]);
+
+  useEffect(() => {
+    const previousNavigationPaneOpen = previousNavigationPaneOpenRef.current;
+    if (previousNavigationPaneOpen === navigationPaneOpen) {
+      return;
+    }
+
+    previousNavigationPaneOpenRef.current = navigationPaneOpen;
+
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 1380px)").matches) {
+      return;
+    }
+
+    const targetElement = navigationPaneOpen ? navigationPaneRef.current : viewerPanelRef.current;
+    if (!targetElement) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [navigationPaneOpen]);
+
   return (
     <main className="app-shell">
-      <section className="hero-card">
+      <section className="hero-card" ref={heroCardRef}>
         <div className="hero-card-header">
           <h1>Dacci</h1>
           <div className="hero-toggle-group">
             <button
+              aria-pressed={navigationPaneOpen}
+              className={navigationPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+              onClick={() => setNavigationPaneOpen((current) => !current)}
+              type="button"
+            >
+              Navigation
+            </button>
+            <button
               aria-pressed={managementPaneOpen}
-              className="ghost-button"
+              className={managementPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
               onClick={handleToggleManagementPane}
               type="button"
             >
               Manage
             </button>
-            <button aria-pressed={syncPaneOpen} className="ghost-button" onClick={handleToggleSyncPane} type="button">
+            <button
+              aria-pressed={libraryPaneOpen}
+              className={libraryPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+              onClick={handleToggleLibraryPane}
+              type="button"
+            >
+              Library
+            </button>
+            <button
+              aria-pressed={syncPaneOpen}
+              className={syncPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+              onClick={handleToggleSyncPane}
+              type="button"
+            >
               Sync
             </button>
           </div>
@@ -1455,24 +1632,31 @@ export function App(props: AppProps) {
       {error ? <p className="notice error">{error}</p> : null}
       {message ? <p className="notice success">{message}</p> : null}
 
-      <section className="workspace-shell">
-        <NavigationPane
-          hasActiveFilter={hasActiveFilter}
-          collapsedTreePaths={collapsedTreePaths}
-          matchedDocumentPaths={matchedDocumentPaths}
-          searchQuery={searchQuery}
-          searchExpandedPaths={searchExpandedPaths}
-          searchResponse={searchResponse}
-          selectedDocumentPath={selectedDocumentPath}
-          showDocuments={showDocuments}
-          topics={topicOptions}
-          onCollapseAll={handleCollapseAllTreeNodes}
-          onSearchQueryChange={setSearchQuery}
-          onSelectDocument={setSelectedDocumentPath}
-          onExpandAll={handleExpandAllTreeNodes}
-          onToggleTreeNode={handleToggleTreeNode}
-          onToggleDocuments={() => setShowDocuments((current) => !current)}
-        />
+      <section className={workspaceShellClassName}>
+        {navigationPaneOpen ? (
+          <NavigationPane
+            hasActiveFilter={hasActiveFilter}
+            collapsedTreePaths={collapsedTreePaths}
+            matchedDocumentPaths={matchedDocumentPaths}
+            panelRef={navigationPaneRef}
+            searchQuery={searchQuery}
+            searchExpandedPaths={searchExpandedPaths}
+            searchResponse={searchResponse}
+            selectedDocumentPath={selectedDocumentPath}
+            showDocuments={showDocuments}
+            topics={topicOptions}
+            onCollapseAll={handleCollapseAllTreeNodes}
+            onSearchQueryChange={setSearchQuery}
+            onSelectDocument={setSelectedDocumentPath}
+            onExpandAll={handleExpandAllTreeNodes}
+            onToggleTreeNode={handleToggleTreeNode}
+            onToggleDocuments={() => setShowDocuments((current) => !current)}
+          />
+        ) : null}
+
+        {showExternalOutline ? (
+          <DocumentOutlinePane className="document-outline-panel" headings={selectedDocumentHeadings} />
+        ) : null}
 
         <section className="panel viewer-panel" ref={viewerPanelRef}>
           {selectedDocument ? (
@@ -1615,7 +1799,12 @@ export function App(props: AppProps) {
                   </div>
                 ) : null}
                 {documentMode === "view" ? (
-                  <MarkdownViewer markdown={selectedDocumentDraft} outlineOpen={outlineOpen} showFrontMatter={showHidden} />
+                  <div className={showDocumentOutline ? "document-reader-layout with-outline" : "document-reader-layout"}>
+                    <MarkdownViewer markdown={selectedDocumentDraft} showFrontMatter={showHidden} />
+                    {showDocumentOutline ? (
+                      <DocumentOutlinePane className="inline-outline-panel" headings={selectedDocumentHeadings} />
+                    ) : null}
+                  </div>
                 ) : (
                   <DocumentEditor
                     disabled={busy}
@@ -1645,7 +1834,7 @@ export function App(props: AppProps) {
         </section>
 
         {hasOpenSidePanel ? (
-          <section className="side-panel-shell">
+          <section className="side-panel-shell" ref={sidePanelShellRef}>
             {managementPaneOpen ? (
               <ManagementPane
                 busy={busy}
@@ -1769,6 +1958,8 @@ export function App(props: AppProps) {
                 onTopicFormNameChange={(value) => setTopicForm({ name: value })}
               />
             ) : null}
+
+            {libraryPaneOpen ? <LibraryPane onToggleOpen={handleToggleLibraryPane} /> : null}
 
             {syncPaneOpen ? (
               <SyncPane

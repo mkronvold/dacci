@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type Ref } from "react";
 
 import type { ContentSearchResponse, ContentTopicNode } from "@dacci/shared-types";
 
@@ -12,6 +12,7 @@ interface NavigationPaneProps {
   searchExpandedPaths: Set<string>;
   hasActiveFilter: boolean;
   matchedDocumentPaths: Set<string>;
+  panelRef?: Ref<HTMLElement>;
   onSearchQueryChange: (value: string) => void;
   onExpandAll: () => void;
   onCollapseAll: () => void;
@@ -55,7 +56,7 @@ function TreeSection(props: TreeSectionProps) {
     <section className="tree-section">
       <button
         aria-expanded={topicExpanded}
-        className="tree-toggle-row"
+        className="tree-toggle-row tree-depth-0"
         onClick={() => props.onToggleTreeNode(props.topic.path)}
         type="button"
       >
@@ -63,10 +64,12 @@ function TreeSection(props: TreeSectionProps) {
           {topicExpanded ? "−" : "+"}
         </span>
         <div className="tree-heading-copy">
-          <h3>{props.topic.name}</h3>
-          <p className="tree-meta">
-            {props.topic.documents.length} topic docs, {props.topic.subtopics.length} subtopics
-          </p>
+          <span className="tree-heading-row">
+            <span className="tree-heading-label">{props.topic.name}</span>
+            <span className="tree-inline-count">
+              ({topicDocuments.length}/{visibleSubtopics.length})
+            </span>
+          </span>
         </div>
       </button>
 
@@ -75,7 +78,11 @@ function TreeSection(props: TreeSectionProps) {
           {topicDocuments.map((document) => (
             <button
               key={document.path}
-              className={document.path === props.selectedDocumentPath ? "document-link active" : "document-link"}
+              className={
+                document.path === props.selectedDocumentPath
+                  ? "document-link tree-depth-1 active"
+                  : "document-link tree-depth-1"
+              }
               onClick={() => props.onSelectDocument(document.path)}
               type="button"
             >
@@ -94,7 +101,7 @@ function TreeSection(props: TreeSectionProps) {
               <div className="subtopic-block" key={subtopic.path}>
                 <button
                   aria-expanded={subtopicExpanded}
-                  className="tree-toggle-row subtopic-toggle-row"
+                  className="tree-toggle-row subtopic-toggle-row tree-depth-1"
                   onClick={() => props.onToggleTreeNode(subtopic.path)}
                   type="button"
                 >
@@ -102,8 +109,10 @@ function TreeSection(props: TreeSectionProps) {
                     {subtopicExpanded ? "−" : "+"}
                   </span>
                   <div className="tree-heading-copy">
-                    <h4>{subtopic.name}</h4>
-                    <p className="tree-meta">{subtopic.documents.length} documents</p>
+                    <span className="tree-heading-row">
+                      <span className="tree-heading-label">{subtopic.name}</span>
+                      <span className="tree-inline-count">({subtopic.documents.length})</span>
+                    </span>
                   </div>
                 </button>
 
@@ -112,7 +121,11 @@ function TreeSection(props: TreeSectionProps) {
                     {subtopic.documents.map((document) => (
                       <button
                         key={document.path}
-                        className={document.path === props.selectedDocumentPath ? "document-link active" : "document-link"}
+                        className={
+                          document.path === props.selectedDocumentPath
+                            ? "document-link tree-depth-2 active"
+                            : "document-link tree-depth-2"
+                        }
                         onClick={() => props.onSelectDocument(document.path)}
                         type="button"
                       >
@@ -143,10 +156,10 @@ export function NavigationPane(props: NavigationPaneProps) {
   }, [props.hasActiveFilter, props.searchResponse]);
 
   return (
-      <aside className="panel navigation-pane">
-        <div className="panel-header">
-          <p className="eyebrow viewer-eyebrow">Navigation</p>
-        </div>
+    <aside className="panel navigation-pane" ref={props.panelRef}>
+      <div className="panel-header">
+        <p className="eyebrow viewer-eyebrow">Navigation</p>
+      </div>
 
       <div className="form-grid tree-toolbar">
         <label>
@@ -158,24 +171,24 @@ export function NavigationPane(props: NavigationPaneProps) {
           />
         </label>
 
-        <div className="inline-actions">
-          <button className="ghost-button" onClick={props.onExpandAll} type="button">
-            Expand all
+        <div className="inline-actions tree-toolbar-actions">
+          <button className="toggle-button tone-dim" onClick={props.onExpandAll} type="button">
+            Expand
           </button>
-          <button className="ghost-button" onClick={props.onCollapseAll} type="button">
-            Collapse all
+          <button className="toggle-button tone-dim" onClick={props.onCollapseAll} type="button">
+            Collapse
           </button>
           <button
-            aria-pressed={!props.showDocuments}
-            className="ghost-button"
+            aria-pressed={props.showDocuments}
+            className={props.showDocuments ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
             onClick={props.onToggleDocuments}
             type="button"
           >
-            {props.showDocuments ? "Hide documents" : "Show documents"}
+            Docs
           </button>
         </div>
 
-        {resultSummary ? <p className="muted">{resultSummary}</p> : null}
+        {resultSummary ? <p className="muted tree-toolbar-summary">{resultSummary}</p> : null}
       </div>
 
       {props.hasActiveFilter && props.searchResponse && props.searchResponse.results.length > 0 ? (

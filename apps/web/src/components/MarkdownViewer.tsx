@@ -13,13 +13,11 @@ import remarkGfm from "remark-gfm";
 import { MermaidBlock } from "./MermaidBlock";
 import {
   extractFrontMatterBlock,
-  extractMarkdownHeadings,
   stripFrontMatter,
 } from "../utils/markdownDocument";
 
 interface MarkdownViewerProps {
   markdown: string;
-  outlineOpen: boolean;
   showFrontMatter: boolean;
 }
 
@@ -30,7 +28,6 @@ const outlineStateStorageKeyPrefix = "dacci.viewer.outline";
 export function MarkdownViewer(props: MarkdownViewerProps) {
   const frontMatterBlock = useMemo(() => extractFrontMatterBlock(props.markdown), [props.markdown]);
   const visibleMarkdown = useMemo(() => stripFrontMatter(props.markdown), [props.markdown]);
-  const headings = useMemo(() => extractMarkdownHeadings(visibleMarkdown), [visibleMarkdown]);
   const hasVisibleContent = visibleMarkdown.trim().length > 0;
   const showFrontMatter = props.showFrontMatter && frontMatterBlock !== null;
 
@@ -43,80 +40,61 @@ export function MarkdownViewer(props: MarkdownViewerProps) {
   }
 
   return (
-    <div className="reader-shell">
-      <div className={headings.length > 1 && props.outlineOpen ? "reader-layout with-outline" : "reader-layout"}>
-        <article className="markdown-viewer">
-          {showFrontMatter ? (
-            <div className="frontmatter-block" aria-label="Document front matter">
-              <p className="frontmatter-label">Front matter</p>
-              <pre>{frontMatterBlock}</pre>
-            </div>
-          ) : null}
-          {hasVisibleContent ? (
-            <ReactMarkdown
-              components={{
-                a({ href, children, ...rest }) {
-                  const isExternal = typeof href === "string" && /^https?:\/\//.test(href);
-                  return (
-                    <a
-                      href={href}
-                      rel={isExternal ? "noreferrer" : undefined}
-                      target={isExternal ? "_blank" : undefined}
-                      {...rest}
-                    >
-                      {children}
-                    </a>
-                  );
-                },
-                h1: createHeading("h1"),
-                h2: createHeading("h2"),
-                h3: createHeading("h3"),
-                h4: createHeading("h4"),
-                h5: createHeading("h5"),
-                h6: createHeading("h6"),
-                pre({ children }) {
-                  const child = Children.toArray(children)[0];
-                  if (isValidElement<{ className?: string; children?: ReactNode }>(child)) {
-                    const className = child.props.className ?? "";
-                    if (className.includes("language-mermaid")) {
-                      return <MermaidBlock chart={extractText(child.props.children).replace(/\n$/, "")} />;
-                    }
-                  }
+    <article className="markdown-viewer">
+      {showFrontMatter ? (
+        <div className="frontmatter-block" aria-label="Document front matter">
+          <p className="frontmatter-label">Front matter</p>
+          <pre>{frontMatterBlock}</pre>
+        </div>
+      ) : null}
+      {hasVisibleContent ? (
+        <ReactMarkdown
+          components={{
+            a({ href, children, ...rest }) {
+              const isExternal = typeof href === "string" && /^https?:\/\//.test(href);
+              return (
+                <a
+                  href={href}
+                  rel={isExternal ? "noreferrer" : undefined}
+                  target={isExternal ? "_blank" : undefined}
+                  {...rest}
+                >
+                  {children}
+                </a>
+              );
+            },
+            h1: createHeading("h1"),
+            h2: createHeading("h2"),
+            h3: createHeading("h3"),
+            h4: createHeading("h4"),
+            h5: createHeading("h5"),
+            h6: createHeading("h6"),
+            pre({ children }) {
+              const child = Children.toArray(children)[0];
+              if (isValidElement<{ className?: string; children?: ReactNode }>(child)) {
+                const className = child.props.className ?? "";
+                if (className.includes("language-mermaid")) {
+                  return <MermaidBlock chart={extractText(child.props.children).replace(/\n$/, "")} />;
+                }
+              }
 
-                  return <pre>{children}</pre>;
-                },
-                table({ children }) {
-                  return (
-                    <div className="markdown-table-wrapper">
-                      <table>{children}</table>
-                    </div>
-                  );
-                },
-              }}
-              rehypePlugins={[rehypeSlug]}
-              remarkPlugins={[remarkGfm]}
-            >
-              {visibleMarkdown}
-            </ReactMarkdown>
-          ) : null}
-        </article>
-
-        {headings.length > 1 && props.outlineOpen ? (
-          <aside className="reader-outline">
-            <p className="reader-outline-title">On this page</p>
-            <nav aria-label="Document outline">
-              <ul>
-                {headings.map((heading) => (
-                  <li className={`outline-depth-${heading.depth}`} key={heading.slug}>
-                    <a href={`#${heading.slug}`}>{heading.text}</a>
-                  </li>
-                ))}
-              </ul>
-            </nav>
-          </aside>
-        ) : null}
-      </div>
-    </div>
+              return <pre>{children}</pre>;
+            },
+            table({ children }) {
+              return (
+                <div className="markdown-table-wrapper">
+                  <table>{children}</table>
+                </div>
+              );
+            },
+          }}
+          rehypePlugins={[rehypeSlug]}
+          remarkPlugins={[remarkGfm]}
+        >
+          {visibleMarkdown}
+        </ReactMarkdown>
+      ) : null}
+    </article>
   );
 }
 
