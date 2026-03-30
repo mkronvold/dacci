@@ -177,7 +177,7 @@ If you prefer to override it explicitly:
 
 ```bash
 GIT_SYNC_REMOTE_URL=git@github.com:example/E2Open.KPE.Content.git \
-docker compose -f deploy/docker/compose.yaml up --build -d
+./scripts/up
 ```
 
 ## Verification

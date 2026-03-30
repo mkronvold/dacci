@@ -8,6 +8,7 @@ services:
       PORT: 3000
       DATA_ROOT: /workspace/data
       GIT_SYNC_REPO_ROOT: /workspace
+      GIT_SYNC_REMOTE_URL: ${GIT_SYNC_REMOTE_URL:-}
       GIT_SSH_COMMAND: ssh -i /var/run/dacci-git/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/run/dacci-git/known_hosts
     ports:
       - "3000:3000"

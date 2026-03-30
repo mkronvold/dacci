@@ -1305,6 +1305,21 @@ export function App(props: AppProps) {
     });
   }, [loadSyncStatus, runAction]);
 
+  const handleRevealTopNotices = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      if (heroCardRef.current) {
+        heroCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }, []);
+
   const handleSyncPull = useCallback(() => {
     void runAction("sync-pull", async () => {
       if (!syncStatus) {
@@ -1347,15 +1362,20 @@ export function App(props: AppProps) {
         return;
       }
 
-      const result = await requestApi<GitSyncOperationResponse>(apiBaseUrl, "/api/sync/push", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: commitMessage }),
-      });
-      setSyncStatus(result.status);
-      setMessage(result.summary);
+      try {
+        const result = await requestApi<GitSyncOperationResponse>(apiBaseUrl, "/api/sync/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: commitMessage }),
+        });
+        setSyncStatus(result.status);
+        setMessage(result.summary);
+      } finally {
+        setOpenSidePanel((current) => (current === "sync" ? null : current));
+        handleRevealTopNotices();
+      }
     });
-  }, [apiBaseUrl, runAction, syncPushMessage, syncStatus]);
+  }, [apiBaseUrl, handleRevealTopNotices, runAction, syncPushMessage, syncStatus]);
 
   const handleConfigureSyncSchedule = useCallback(() => {
     void runAction("sync-schedule-configure", async () => {
