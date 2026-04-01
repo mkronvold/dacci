@@ -23,7 +23,7 @@ export function buildLibraryStateStorageKey(apiBaseUrl: string): string {
 export function readPersistedLibraryState(apiBaseUrl: string): PersistedLibraryState {
   const defaultState: PersistedLibraryState = {
     entries: [],
-    lastViewedRepoId: configuredRepoId,
+    lastViewedRepoId: "",
   };
 
   if (typeof window === "undefined") {
@@ -78,7 +78,7 @@ export function writePersistedLibraryState(apiBaseUrl: string, state: PersistedL
 export function createConfiguredLibraryRepo(summary: RepoContextSummary): SavedLibraryRepoDefinition {
   const configuredRepo: SavedLibraryRepoDefinition = {
     id: configuredRepoId,
-    name: summary.name.trim() || "Configured repository",
+    name: summary.name.trim() || "Active repository",
     repoRoot: summary.repoRoot,
     dataRoot: summary.dataRoot,
     source: "configured",
@@ -89,12 +89,28 @@ export function createConfiguredLibraryRepo(summary: RepoContextSummary): SavedL
   return configuredRepo;
 }
 
+export function createDiscoveredLibraryRepo(summary: RepoContextSummary): SavedLibraryRepoDefinition {
+  const discoveredRepo: SavedLibraryRepoDefinition = {
+    id: summary.id,
+    name: summary.name.trim() || "Discovered repository",
+    repoRoot: summary.repoRoot,
+    source: summary.isDefault ? "configured" : "discovered",
+  };
+  if (summary.dataRoot) {
+    discoveredRepo.dataRoot = summary.dataRoot;
+  }
+  if (summary.releaseBranch) {
+    discoveredRepo.releaseBranch = summary.releaseBranch;
+  }
+  return discoveredRepo;
+}
+
 export function reconcileLibraryState(
   entries: SavedLibraryRepoDefinition[],
   lastViewedRepoId: string,
-  configuredRepo: SavedLibraryRepoDefinition | null,
+  runtimeRepos: SavedLibraryRepoDefinition[] = [],
 ): PersistedLibraryState {
-  const nextEntries = configuredRepo ? mergeConfiguredLibraryRepo(entries, configuredRepo) : sortSavedLibraryRepos(entries);
+  const nextEntries = runtimeRepos.length > 0 ? mergeRuntimeLibraryRepos(entries, runtimeRepos) : sortSavedLibraryRepos(entries);
   return {
     entries: nextEntries,
     lastViewedRepoId: normalizeLastViewedRepoId(lastViewedRepoId, nextEntries),
@@ -120,7 +136,7 @@ export function buildRepoSelection(
   entries: SavedLibraryRepoDefinition[],
 ): RepoSelection {
   const selectedEntry = findSavedLibraryRepo(entries, selectedRepoId);
-  if (!selectedEntry || isConfiguredLibraryRepo(selectedEntry)) {
+  if (!selectedEntry) {
     return { kind: "default" };
   }
 
@@ -185,7 +201,10 @@ function parseSavedLibraryRepoDefinition(value: unknown): SavedLibraryRepoDefini
     typeof candidate.releaseBranch === "string" && candidate.releaseBranch.trim().length > 0
       ? candidate.releaseBranch.trim()
       : undefined;
-  const source = candidate.source === "configured" || candidate.source === "saved" ? candidate.source : undefined;
+  const source =
+    candidate.source === "configured" || candidate.source === "discovered" || candidate.source === "saved"
+      ? candidate.source
+      : undefined;
 
   const parsedRepo: SavedLibraryRepoDefinition = {
     id: candidate.id.trim(),
@@ -206,17 +225,28 @@ function parseSavedLibraryRepoDefinition(value: unknown): SavedLibraryRepoDefini
 }
 
 function normalizeLastViewedRepoId(value: string, entries: SavedLibraryRepoDefinition[]): string {
-  const normalizedValue = value.trim() || configuredRepoId;
+  const normalizedValue = value.trim();
   const migratedValue =
     normalizedValue === legacyDefaultRepoSelectionId ? configuredRepoId : normalizedValue;
 
-  return migratedValue === configuredRepoId || entries.some((entry) => entry.id === migratedValue)
-    ? migratedValue
-    : configuredRepoId;
+  if (migratedValue && entries.some((entry) => entry.id === migratedValue)) {
+    return migratedValue;
+  }
+
+  return entries[0]?.id ?? "";
 }
 
 function sortSavedLibraryRepos(entries: SavedLibraryRepoDefinition[]): SavedLibraryRepoDefinition[] {
-  return [...entries].sort((left, right) => left.name.localeCompare(right.name));
+  return [...entries].sort((left, right) => {
+    const nameComparison = left.name.localeCompare(right.name, undefined, {
+      sensitivity: "base",
+    });
+    if (nameComparison !== 0) {
+      return nameComparison;
+    }
+
+    return left.repoRoot.localeCompare(right.repoRoot);
+  });
 }
 
 function normalizeSavedRepoPath(value: string): string {
@@ -227,4 +257,92 @@ function normalizeSavedRepoPath(value: string): string {
   return value.startsWith(`${legacyLibraryWorkspacePrefix}/`)
     ? `${runtimeWorkspacePrefix}${value.slice(legacyLibraryWorkspacePrefix.length)}`
     : value;
+}
+
+function mergeRuntimeLibraryRepos(
+  entries: SavedLibraryRepoDefinition[],
+  runtimeRepos: SavedLibraryRepoDefinition[],
+): SavedLibraryRepoDefinition[] {
+  let nextEntries = entries.filter((entry) => entry.source !== "configured" && entry.source !== "discovered");
+
+  for (const runtimeRepo of runtimeRepos) {
+    const matchingEntry = entries.find((entry) => libraryReposReferToSameCheckout(entry, runtimeRepo));
+    nextEntries = upsertRuntimeLibraryRepo(nextEntries, mergeRuntimeLibraryRepo(matchingEntry, runtimeRepo));
+  }
+
+  return sortSavedLibraryRepos(nextEntries);
+}
+
+function mergeRuntimeLibraryRepo(
+  existingEntry: SavedLibraryRepoDefinition | undefined,
+  runtimeRepo: SavedLibraryRepoDefinition,
+): SavedLibraryRepoDefinition {
+  if (!existingEntry) {
+    return runtimeRepo;
+  }
+
+  if (isConfiguredLibraryRepo(runtimeRepo)) {
+    return {
+      ...runtimeRepo,
+      source: "configured",
+    };
+  }
+
+  if (existingEntry.source === "saved") {
+    const mergedSavedRepo: SavedLibraryRepoDefinition = {
+      id: existingEntry.id,
+      source: "saved",
+      name: existingEntry.name.trim() || runtimeRepo.name,
+      repoRoot: runtimeRepo.repoRoot,
+    };
+    const dataRoot = existingEntry.dataRoot ?? runtimeRepo.dataRoot;
+    if (dataRoot) {
+      mergedSavedRepo.dataRoot = dataRoot;
+    }
+    const releaseBranch = existingEntry.releaseBranch ?? runtimeRepo.releaseBranch;
+    if (releaseBranch) {
+      mergedSavedRepo.releaseBranch = releaseBranch;
+    }
+    return mergedSavedRepo;
+  }
+
+  const mergedRuntimeRepo: SavedLibraryRepoDefinition = {
+    id: existingEntry.id,
+    name: runtimeRepo.name,
+    repoRoot: runtimeRepo.repoRoot,
+  };
+  if (runtimeRepo.dataRoot) {
+    mergedRuntimeRepo.dataRoot = runtimeRepo.dataRoot;
+  }
+  if (runtimeRepo.releaseBranch) {
+    mergedRuntimeRepo.releaseBranch = runtimeRepo.releaseBranch;
+  }
+  const source = runtimeRepo.source ?? existingEntry.source;
+  if (source) {
+    mergedRuntimeRepo.source = source;
+  }
+  return mergedRuntimeRepo;
+}
+
+function upsertRuntimeLibraryRepo(
+  entries: SavedLibraryRepoDefinition[],
+  repo: SavedLibraryRepoDefinition,
+): SavedLibraryRepoDefinition[] {
+  const remainingEntries = entries.filter((entry) => !libraryReposReferToSameCheckout(entry, repo));
+  return [...remainingEntries, repo];
+}
+
+function libraryReposReferToSameCheckout(
+  left: SavedLibraryRepoDefinition,
+  right: SavedLibraryRepoDefinition,
+): boolean {
+  if (left.id === right.id) {
+    return true;
+  }
+
+  if (isConfiguredLibraryRepo(left) || isConfiguredLibraryRepo(right)) {
+    return isConfiguredLibraryRepo(left) && isConfiguredLibraryRepo(right);
+  }
+
+  return left.repoRoot === right.repoRoot;
 }

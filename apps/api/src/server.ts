@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,26 +7,31 @@ import { parseConfiguredLibraryRoots } from "./repoContext.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRepoRoot = path.resolve(__dirname, "../../..");
-const defaultContentRepoRoot = resolveDefaultContentRepoRoot(appRepoRoot);
-const dataRoot = process.env.DATA_ROOT ?? path.join(defaultContentRepoRoot, "data");
-const gitSyncRepoRoot = process.env.GIT_SYNC_REPO_ROOT ?? path.resolve(dataRoot, "..");
+const defaultWorkspaceRoot = path.join(appRepoRoot, "workspace");
+mkdirSync(defaultWorkspaceRoot, { recursive: true });
+const explicitDataRoot = normalizeOptionalEnvPath(process.env.DATA_ROOT);
+const explicitGitSyncRepoRoot = normalizeOptionalEnvPath(process.env.GIT_SYNC_REPO_ROOT);
+const defaultContentRepoRoot = resolveDefaultContentRepoRoot(defaultWorkspaceRoot);
+const dataRoot = explicitDataRoot ?? (defaultContentRepoRoot ? path.join(defaultContentRepoRoot, "data") : undefined);
+const gitSyncRepoRoot = explicitGitSyncRepoRoot ?? defaultContentRepoRoot;
 const gitSyncRemoteName = process.env.GIT_SYNC_REMOTE_NAME ?? "origin";
 const gitSyncRemoteUrl = process.env.GIT_SYNC_REMOTE_URL;
 const gitSshCommand = process.env.GIT_SSH_COMMAND;
 const gitSyncReleaseBranch = process.env.GIT_SYNC_RELEASE_BRANCH ?? "default";
-const libraryRepoRoots = parseConfiguredLibraryRoots(
-  gitSyncRepoRoot,
-  process.env.DACCI_LIBRARY_ROOTS,
-);
+const libraryRepoRoots = process.env.DACCI_LIBRARY_ROOTS?.trim()
+  ? parseConfiguredLibraryRoots(undefined, process.env.DACCI_LIBRARY_ROOTS)
+  : buildDefaultLibraryRoots(defaultWorkspaceRoot, gitSyncRepoRoot);
 const port = parsePort(process.env.PORT ?? "3000", 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 
 const appOptions: BuildAppOptions = {
-  dataRoot,
-  gitSyncRepoRoot,
   gitSyncRemoteName,
   gitSyncReleaseBranch,
 };
+if (dataRoot && gitSyncRepoRoot) {
+  appOptions.dataRoot = dataRoot;
+  appOptions.gitSyncRepoRoot = gitSyncRepoRoot;
+}
 if (gitSyncRemoteUrl) {
   appOptions.gitSyncRemoteUrl = gitSyncRemoteUrl;
 }
@@ -92,14 +97,58 @@ function parsePort(value: string, fallback: number): number {
   return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : fallback;
 }
 
-function resolveDefaultContentRepoRoot(repoRoot: string): string {
-  const siblingContentRepoRoot = path.resolve(repoRoot, "../E2Open.KPE.Content");
-  if (
-    existsSync(path.join(siblingContentRepoRoot, ".git")) &&
-    existsSync(path.join(siblingContentRepoRoot, "data"))
-  ) {
-    return siblingContentRepoRoot;
+function normalizeOptionalEnvPath(value: string | undefined): string | undefined {
+  const normalizedValue = value?.trim();
+  return normalizedValue ? path.resolve(normalizedValue) : undefined;
+}
+
+function buildDefaultLibraryRoots(workspaceRoot: string, defaultRepoRoot?: string): string[] {
+  const roots = new Set<string>([workspaceRoot]);
+  if (defaultRepoRoot && !isSameOrInside(workspaceRoot, defaultRepoRoot)) {
+    roots.add(path.dirname(defaultRepoRoot));
   }
 
-  return repoRoot;
+  return [...roots];
+}
+
+function resolveDefaultContentRepoRoot(workspaceRoot: string): string | undefined {
+  try {
+    const repoRoots = readdirSync(workspaceRoot, {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => path.join(workspaceRoot, entry.name))
+      .filter((repoRoot) => hasGitMetadata(repoRoot) && isDirectory(path.join(repoRoot, "data")))
+      .sort((left, right) => {
+        if (path.basename(left) === "E2Open.KPE.Content") {
+          return -1;
+        }
+        if (path.basename(right) === "E2Open.KPE.Content") {
+          return 1;
+        }
+
+        return left.localeCompare(right);
+      });
+
+    return repoRoots[0];
+  } catch {
+    return undefined;
+  }
+}
+
+function hasGitMetadata(repoRoot: string): boolean {
+  return existsSync(path.join(repoRoot, ".git"));
+}
+
+function isDirectory(candidatePath: string): boolean {
+  try {
+    return statSync(candidatePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isSameOrInside(rootPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
 }

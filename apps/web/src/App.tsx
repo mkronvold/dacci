@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import {
-  configuredRepoId,
-  repoSelectionHeaderName,
-} from "@dacci/shared-types";
+import { repoSelectionHeaderName } from "@dacci/shared-types";
 import type {
   ApiInfoResponse,
   ContentDocument,
@@ -31,6 +28,7 @@ import type {
   HealthCheckResponse,
   ImportDocumentsRequest,
   ImportDocumentsResponse,
+  LibraryRepoDiscoveryResponse,
   LibraryRepoTestResponse,
   MoveDocumentRequest,
   RepoContextSummary,
@@ -60,7 +58,7 @@ import {
 } from "./utils/markdownDocument";
 import {
   buildRepoSelection,
-  createConfiguredLibraryRepo,
+  createDiscoveredLibraryRepo,
   encodeRepoSelectionHeaderValue,
   findSavedLibraryRepo,
   isConfiguredLibraryRepo,
@@ -130,7 +128,7 @@ type SyncScheduleFormState = {
 
 type LibraryRepoFormState = {
   id: string | null;
-  source: "configured" | "saved" | null;
+  source: "configured" | "discovered" | "saved" | null;
   name: string;
   repoRoot: string;
   dataRoot: string;
@@ -456,6 +454,7 @@ export function App(props: AppProps) {
   const persistedUiToggleState = useMemo(() => readPersistedUiToggleState(apiBaseUrl), [apiBaseUrl]);
   const persistedLibraryState = useMemo(() => readPersistedLibraryState(apiBaseUrl), [apiBaseUrl]);
   const [apiInfo, setApiInfo] = useState<ApiInfoResponse | null>(null);
+  const [libraryDiscovery, setLibraryDiscovery] = useState<LibraryRepoDiscoveryResponse | null>(null);
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [syncStatus, setSyncStatus] = useState<GitSyncStatus | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -579,6 +578,14 @@ export function App(props: AppProps) {
   const syncPaneOpen = openSidePanel === "sync";
   const hasOpenSidePanel = openSidePanel !== null;
   const contentChangeCount = syncStatus?.changedFiles.length ?? 0;
+  const hasChangesToPull = (syncStatus?.behind ?? 0) > 0;
+  const pullActionAvailable = Boolean(syncStatus) && !busy && (syncStatus?.pullBlockers.length ?? 0) === 0;
+  const hasChangesToPush = Boolean(syncStatus) && (contentChangeCount > 0 || (syncStatus?.ahead ?? 0) > 0);
+  const pushActionAvailable =
+    Boolean(syncStatus) &&
+    !busy &&
+    syncPushMessage.trim().length > 0 &&
+    (syncStatus?.pushBlockers.length ?? 0) === 0;
   const showOutlineToggle = documentMode === "view" && selectedDocumentHeadings.length > 1;
   const showTagToggle = documentMode === "view";
   const showHiddenToggle = documentMode === "view";
@@ -586,9 +593,11 @@ export function App(props: AppProps) {
   const showExternalOutline = showDocumentOutline;
   const showInlineOutline = showDocumentOutline;
   const selectedDocumentHasFrontMatter = selectedDocumentFrontMatterBlock !== null;
-  const configuredLibraryRepo = useMemo(
-    () => (apiInfo ? createConfiguredLibraryRepo(apiInfo.configuredRepo) : null),
-    [apiInfo],
+  const runtimeLibraryRepos = useMemo(
+    () =>
+      (libraryDiscovery?.repos ?? [])
+        .map((summary) => createDiscoveredLibraryRepo(summary)),
+    [libraryDiscovery],
   );
   const scrollPaneSectionIntoView = useCallback((container: HTMLDivElement | null, element: HTMLElement | null) => {
     if (!element) {
@@ -633,8 +642,13 @@ export function App(props: AppProps) {
     () => buildRepoSelection(selectedRepoId, libraryEntries),
     [libraryEntries, selectedRepoId],
   );
+  const hasActiveRepoSelection =
+    activeRepoSelection.kind === "library" || Boolean(apiInfo?.configuredRepo);
   const activeRepoLabel =
-    findSavedLibraryRepo(libraryEntries, selectedRepoId)?.name ?? configuredLibraryRepo?.name ?? "Configured repository";
+    findSavedLibraryRepo(libraryEntries, selectedRepoId)?.name ??
+    libraryEntries[0]?.name ??
+    apiInfo?.configuredRepo?.name ??
+    "Content repository";
   const selectedLibraryRepo =
     findSavedLibraryRepo(libraryEntries, selectedRepoId) ?? null;
   const updateSavedRepoFromSummary = useCallback((summary: RepoContextSummary) => {
@@ -730,14 +744,25 @@ export function App(props: AppProps) {
     [requestSelectedRepoApi, selectedDocumentPath],
   );
 
+  const refreshTreeAndSelectedDocument = useCallback(
+    async (preferredDocumentPath?: string | null) => {
+      const treeBody = await loadTree(preferredDocumentPath);
+      if (preferredDocumentPath && hasDocumentPath(treeBody, preferredDocumentPath)) {
+        await loadDocumentAtPath(preferredDocumentPath);
+      }
+    },
+    [loadDocumentAtPath, loadTree],
+  );
+
   useEffect(() => {
     let cancelled = false;
 
     async function loadRuntimeInfo() {
       try {
-        const [apiInfoBody, healthBody] = await Promise.all([
+        const [apiInfoBody, healthBody, libraryDiscoveryBody] = await Promise.all([
           requestApi<ApiInfoResponse>(apiBaseUrl, "/api"),
           requestApi<HealthCheckResponse>(apiBaseUrl, "/health"),
+          requestApi<LibraryRepoDiscoveryResponse>(apiBaseUrl, "/api/library/discover"),
         ]);
 
         if (cancelled) {
@@ -746,6 +771,10 @@ export function App(props: AppProps) {
 
         setApiInfo(apiInfoBody);
         setHealth(healthBody);
+        setLibraryDiscovery(libraryDiscoveryBody);
+        if (persistedLibraryState.entries.length === 0 && libraryDiscoveryBody.repos.length === 0) {
+          setOpenSidePanel((current) => current ?? "library");
+        }
       } catch (loadError) {
         if (!cancelled) {
           console.warn("Failed to load initial app state.", loadError);
@@ -759,7 +788,7 @@ export function App(props: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, persistedLibraryState.entries.length]);
 
   useEffect(() => {
     const scheduler = syncStatus?.scheduler;
@@ -791,25 +820,25 @@ export function App(props: AppProps) {
   }, [persistedLibraryState]);
 
   useEffect(() => {
-    if (!configuredLibraryRepo) {
+    if (!libraryDiscovery) {
       return;
     }
 
-    const nextState = reconcileLibraryState(libraryEntries, selectedRepoId, configuredLibraryRepo);
+    const nextState = reconcileLibraryState(libraryEntries, selectedRepoId, runtimeLibraryRepos);
     if (!savedLibraryRepoListEquals(libraryEntries, nextState.entries)) {
       setLibraryEntries(nextState.entries);
     }
     if (nextState.lastViewedRepoId !== selectedRepoId) {
       setSelectedRepoId(nextState.lastViewedRepoId);
     }
-  }, [configuredLibraryRepo, libraryEntries, selectedRepoId]);
+  }, [libraryDiscovery, libraryEntries, runtimeLibraryRepos, selectedRepoId]);
 
   useEffect(() => {
-    if (libraryEntries.some((entry) => entry.id === selectedRepoId) || selectedRepoId === configuredRepoId) {
+    if (libraryEntries.some((entry) => entry.id === selectedRepoId)) {
       return;
     }
 
-    setSelectedRepoId(configuredRepoId);
+    setSelectedRepoId(libraryEntries[0]?.id ?? "");
   }, [libraryEntries, selectedRepoId]);
 
   useEffect(() => {
@@ -821,7 +850,7 @@ export function App(props: AppProps) {
   }, [libraryPaneOpen, libraryRepoForm.id, scrollPaneSectionIntoView]);
 
   useEffect(() => {
-    if (!apiInfo) {
+    if (!apiInfo || !hasActiveRepoSelection) {
       return;
     }
 
@@ -847,7 +876,7 @@ export function App(props: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [apiInfo, loadSyncStatus, loadTree]);
+  }, [apiInfo, hasActiveRepoSelection, loadSyncStatus, loadTree]);
 
   useEffect(() => {
     if (!selectedDocumentPath) {
@@ -896,6 +925,10 @@ export function App(props: AppProps) {
   }, [requestSelectedRepoApi, selectedDocumentPath]);
 
   useEffect(() => {
+    if (!hasActiveRepoSelection) {
+      return;
+    }
+
     const intervalId = window.setInterval(() => {
       void (async () => {
         const previousLastPullAt = syncStatus?.scheduler?.lastPullAt ?? null;
@@ -903,14 +936,7 @@ export function App(props: AppProps) {
         const nextLastPullAt = nextStatus?.scheduler?.lastPullAt ?? null;
 
         if (nextLastPullAt && nextLastPullAt !== previousLastPullAt) {
-          await loadTree(selectedDocumentPath);
-          if (selectedDocumentPath) {
-            try {
-              await loadDocumentAtPath(selectedDocumentPath);
-            } catch {
-              // The tree refresh will already move selection if the document disappeared.
-            }
-          }
+          await refreshTreeAndSelectedDocument(selectedDocumentPath);
         }
       })();
     }, 60_000);
@@ -918,7 +944,7 @@ export function App(props: AppProps) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [loadDocumentAtPath, loadSyncStatus, loadTree, selectedDocumentPath, syncStatus?.scheduler?.lastPullAt]);
+  }, [hasActiveRepoSelection, loadSyncStatus, refreshTreeAndSelectedDocument, selectedDocumentPath, syncStatus?.scheduler?.lastPullAt]);
 
   useEffect(() => {
     if (!selectedDocument) {
@@ -1572,10 +1598,10 @@ export function App(props: AppProps) {
         method: "POST",
       });
       setSyncStatus(result.status);
-      await loadTree(selectedDocumentPath);
+      await refreshTreeAndSelectedDocument(selectedDocumentPath);
       setMessage(result.summary);
     });
-  }, [loadTree, requestSelectedRepoApi, runAction, selectedDocumentPath, syncStatus]);
+  }, [refreshTreeAndSelectedDocument, requestSelectedRepoApi, runAction, selectedDocumentPath, syncStatus]);
 
   const handleSyncPush = useCallback(() => {
     void runAction("sync-push", async () => {
@@ -1618,7 +1644,7 @@ export function App(props: AppProps) {
     void runAction("sync-schedule-configure", async () => {
       const intervalMinutes = Number.parseInt(syncScheduleForm.intervalMinutes, 10);
       if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
-        throw new Error("Background sync interval must be a whole number of minutes between 1 and 1440.");
+        throw new Error("Background pull interval must be a whole number of minutes between 1 and 1440.");
       }
 
       const result = await requestSelectedRepoApi<GitSyncScheduleResponse>("/api/sync/schedule", {
@@ -1668,6 +1694,19 @@ export function App(props: AppProps) {
     [apiBaseUrl],
   );
 
+  const handleRefreshLibraryRepositories = useCallback(() => {
+    void runAction("refresh-library", async () => {
+      const discovery = await requestApi<LibraryRepoDiscoveryResponse>(
+        apiBaseUrl,
+        "/api/library/discover",
+      );
+      setLibraryDiscovery(discovery);
+      setMessage(
+        `Refreshed ${discovery.repos.length} available repositor${discovery.repos.length === 1 ? "y" : "ies"}.`,
+      );
+    });
+  }, [apiBaseUrl, runAction]);
+
   const handleSelectRepo = useCallback(
     (nextRepoId: string) => {
       void runAction("select-library-repo", async () => {
@@ -1677,7 +1716,7 @@ export function App(props: AppProps) {
 
         const nextRepo = libraryEntries.find((entry) => entry.id === nextRepoId);
         if (!nextRepo) {
-          setError("Choose a saved repository before switching to it.");
+          setError("Choose an available repository before switching to it.");
           return;
         }
 
@@ -1727,7 +1766,7 @@ export function App(props: AppProps) {
   const handleEditLibraryRepo = useCallback((repo: SavedLibraryRepoDefinition) => {
     setLibraryRepoForm({
       id: repo.id,
-      source: isConfiguredLibraryRepo(repo) ? "configured" : "saved",
+      source: isConfiguredLibraryRepo(repo) ? "configured" : (repo.source ?? "saved"),
       name: repo.name,
       repoRoot: repo.repoRoot,
       dataRoot: repo.dataRoot ?? "",
@@ -1751,7 +1790,12 @@ export function App(props: AppProps) {
       }
 
       if (isConfiguredLibraryRepo(repo)) {
-        setError("The configured repository is managed by this Dacci runtime and cannot be removed.");
+        setError("This runtime-provided repository cannot be removed.");
+        return;
+      }
+
+      if (repo.source === "discovered") {
+        setError("Discovered repositories come from the current workspace. Remove the checkout or save your own override instead.");
         return;
       }
 
@@ -1763,9 +1807,15 @@ export function App(props: AppProps) {
       setLibraryTestResult((current) => (current?.repo.id === repoId ? null : current));
       setLibraryRepoForm((current) => (current.id === repoId ? createEmptyLibraryRepoFormState() : current));
       if (selectedRepoId === repoId) {
+        const remainingEntries = libraryEntries.filter((entry) => entry.id !== repoId);
+        const nextRepo = remainingEntries[0] ?? null;
         resetRepoBoundState();
-        setSelectedRepoId(configuredRepoId);
-        setMessage(`Removed '${repo.name}' and switched to the configured repository.`);
+        setSelectedRepoId(nextRepo?.id ?? "");
+        setMessage(
+          nextRepo
+            ? `Removed '${repo.name}' and switched to '${nextRepo.name}'.`
+            : `Removed saved repository '${repo.name}'.`,
+        );
         return;
       }
 
@@ -1800,7 +1850,7 @@ export function App(props: AppProps) {
           return;
         }
 
-        const nextState = reconcileLibraryState(importedEntries, selectedRepoId, configuredLibraryRepo);
+        const nextState = reconcileLibraryState(importedEntries, selectedRepoId, runtimeLibraryRepos);
         setLibraryEntries(nextState.entries);
         setSelectedRepoId(nextState.lastViewedRepoId);
         if (
@@ -1814,7 +1864,7 @@ export function App(props: AppProps) {
         setMessage(`Imported ${importedEntries.length} saved repositor${importedEntries.length === 1 ? "y" : "ies"}.`);
       });
     },
-    [configuredLibraryRepo, libraryEntries, resetRepoBoundState, runAction, selectedRepoId],
+    [libraryEntries, resetRepoBoundState, runAction, runtimeLibraryRepos, selectedRepoId],
   );
 
   const handleToggleMode = useCallback(() => {
@@ -2038,13 +2088,9 @@ export function App(props: AppProps) {
       <section className="hero-card" ref={heroCardRef}>
         <div className="hero-card-header">
           <div className="hero-copy">
-            <h1>Dacci</h1>
-            <p className="tagline">
-              Docs as Code. Context Included.
-            </p>
-            <div className="sync-chip-row hero-status-row">
-              <span className="metadata-pill success">Active repo {activeRepoLabel}</span>
-              {selectedLibraryRepo ? <span className="metadata-pill">{selectedLibraryRepo.repoRoot}</span> : null}
+            <div className="hero-title-row">
+              <h1 className="hero-title">Dacci</h1>
+              <p className="tagline">Docs as Code. Context Included.</p>
             </div>
           </div>
           <div className="hero-header-actions">
@@ -2091,6 +2137,26 @@ export function App(props: AppProps) {
               >
                 Sync
               </button>
+              {hasChangesToPull ? (
+                <button
+                  className={pullActionAvailable ? "toggle-button tone-bright" : "toggle-button tone-dim"}
+                  disabled={!pullActionAvailable}
+                  onClick={handleSyncPull}
+                  type="button"
+                >
+                  Pull
+                </button>
+              ) : null}
+              {hasChangesToPush ? (
+                <button
+                  className={pushActionAvailable ? "toggle-button tone-bright" : "toggle-button tone-dim"}
+                  disabled={!pushActionAvailable}
+                  onClick={handleSyncPush}
+                  type="button"
+                >
+                  Push
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -2448,6 +2514,7 @@ export function App(props: AppProps) {
                 onCancelEdit={handleCancelLibraryEdit}
                 onEditRepo={handleEditLibraryRepo}
                 onExportLibrary={handleExportLibrary}
+                onRefreshRepositories={handleRefreshLibraryRepositories}
                 onFormDataRootChange={(value) =>
                   setLibraryRepoForm((current) => ({
                     ...current,
@@ -2615,7 +2682,7 @@ function buildLibraryRepoDefinitionFromForm(form: LibraryRepoFormState): SavedLi
   }
   const releaseBranch = form.releaseBranch.trim();
 
-  const source = form.source ?? "saved";
+  const source = form.source === "configured" ? "configured" : "saved";
   const baseRepo: SavedLibraryRepoDefinition = {
     id: form.id ?? createLibraryRepoId(),
     source,
@@ -2638,7 +2705,10 @@ function upsertLibraryRepo(
   repo: SavedLibraryRepoDefinition,
 ): SavedLibraryRepoDefinition[] {
   const remainingEntries = entries.filter(
-    (entry) => entry.id !== repo.id && !(isConfiguredLibraryRepo(entry) && isConfiguredLibraryRepo(repo)),
+    (entry) =>
+      entry.id !== repo.id &&
+      !(isConfiguredLibraryRepo(entry) && isConfiguredLibraryRepo(repo)) &&
+      (isConfiguredLibraryRepo(entry) || isConfiguredLibraryRepo(repo) || entry.repoRoot !== repo.repoRoot),
   );
   return [...remainingEntries, repo].sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -2690,7 +2760,10 @@ function parseImportedLibraryRepo(value: unknown): SavedLibraryRepoDefinition {
 
   const id = typeof candidate.id === "string" && candidate.id.trim() ? candidate.id.trim() : createLibraryRepoId();
   const dataRoot = typeof candidate.dataRoot === "string" ? candidate.dataRoot.trim() : "";
-  const source = candidate.source === "configured" || candidate.source === "saved" ? candidate.source : "saved";
+  const source =
+    candidate.source === "configured" || candidate.source === "discovered" || candidate.source === "saved"
+      ? candidate.source
+      : "saved";
   const releaseBranch = typeof candidate.releaseBranch === "string" ? candidate.releaseBranch.trim() : "";
 
   const repo: SavedLibraryRepoDefinition = {
@@ -2713,18 +2786,19 @@ function applyRepoSummaryToSavedRepo(
   repo: SavedLibraryRepoDefinition,
   summary: RepoContextSummary,
 ): SavedLibraryRepoDefinition {
-  const preservedName = summary.isDefault ? summary.name : repo.name.trim() || summary.name;
+  const runtimeSource = summary.isDefault ? "configured" : "discovered";
+  const preserveSavedOverrides = repo.source === "saved";
   const nextRepo: SavedLibraryRepoDefinition = {
     id: repo.id,
-    source: summary.isDefault ? "configured" : (repo.source ?? "saved"),
-    name: preservedName,
+    source: preserveSavedOverrides ? "saved" : runtimeSource,
+    name: preserveSavedOverrides ? (repo.name.trim() || summary.name) : summary.name,
     repoRoot: summary.repoRoot,
   };
 
   if (summary.dataRoot) {
     nextRepo.dataRoot = summary.dataRoot;
   }
-  if (summary.isDefault && summary.releaseBranch) {
+  if (!preserveSavedOverrides && summary.releaseBranch) {
     nextRepo.releaseBranch = summary.releaseBranch;
   } else if (repo.releaseBranch) {
     nextRepo.releaseBranch = repo.releaseBranch;

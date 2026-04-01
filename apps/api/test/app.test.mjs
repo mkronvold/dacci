@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -121,6 +121,7 @@ test("api advertises the phase 12 runtime endpoints", async (t) => {
   assert.equal(body.configuredRepo.releaseBranch, "default");
   assert.ok(body.endpoints.includes("/ready"));
   assert.ok(body.endpoints.includes("/api/search"));
+  assert.ok(body.endpoints.includes("/api/library/discover"));
   assert.ok(body.endpoints.includes("/api/import/documents"));
   assert.ok(body.endpoints.includes("/api/export"));
   assert.ok(body.endpoints.includes("/api/topics"));
@@ -128,6 +129,105 @@ test("api advertises the phase 12 runtime endpoints", async (t) => {
   assert.ok(body.endpoints.includes("/api/sync/schedule"));
   assert.ok(body.endpoints.includes("/api/sync/schedule/pause"));
   assert.ok(body.endpoints.includes("/api/sync/schedule/resume"));
+});
+
+test("api discovers configured and sibling workspace repos", async (t) => {
+  const workspaceRoot = await createTempDataRoot("dacci-api-library-discover-");
+  const defaultRepo = await createGitBackedContentRepo(
+    "configured-content-",
+    [
+      {
+        path: "Default Topic/Guide.md",
+        body: "# Default\n",
+      },
+    ],
+    workspaceRoot,
+  );
+  const libraryRepo = await createGitBackedContentRepo(
+    "library-content-",
+    [
+      {
+        path: "Library Topic/Guide.md",
+        body: "# Library\n",
+      },
+    ],
+    workspaceRoot,
+  );
+  const nonRepoDirectory = path.join(workspaceRoot, "not-a-repo");
+  const gitWithoutDataDirectory = path.join(workspaceRoot, "git-without-data");
+  const dataWithoutGitDirectory = path.join(workspaceRoot, "data-without-git");
+
+  await mkdir(nonRepoDirectory, { recursive: true });
+  await mkdir(gitWithoutDataDirectory, { recursive: true });
+  await runGit(["init", "--initial-branch=main"], gitWithoutDataDirectory);
+  await mkdir(path.join(dataWithoutGitDirectory, "data"), { recursive: true });
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [workspaceRoot],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/library/discover",
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.deepEqual(body.libraryRoots, [workspaceRoot]);
+  assert.equal(body.repos.length, 2);
+
+  const defaultSummary = body.repos.find((repo) => repo.repoRoot === defaultRepo.repoRoot);
+  assert.ok(defaultSummary);
+  assert.equal(defaultSummary.id, "configured-repo");
+  assert.equal(defaultSummary.kind, "default");
+  assert.equal(defaultSummary.dataRoot, defaultRepo.dataRoot);
+
+  const librarySummary = body.repos.find((repo) => repo.repoRoot === libraryRepo.repoRoot);
+  assert.ok(librarySummary);
+  assert.equal(librarySummary.kind, "library");
+  assert.equal(librarySummary.dataRoot, libraryRepo.dataRoot);
+  assert.match(librarySummary.id, /^discovered-[0-9a-f]{12}$/);
+});
+
+test("api starts cleanly with an empty workspace", async (t) => {
+  const workspaceRoot = await createTempDataRoot("dacci-api-empty-workspace-");
+  const app = await buildApp({
+    libraryRepoRoots: [workspaceRoot],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+
+  const [apiResponse, readyResponse, discoveryResponse] = await Promise.all([
+    app.inject({
+      method: "GET",
+      url: "/api",
+    }),
+    app.inject({
+      method: "GET",
+      url: "/ready",
+    }),
+    app.inject({
+      method: "GET",
+      url: "/api/library/discover",
+    }),
+  ]);
+
+  assert.equal(apiResponse.statusCode, 200);
+  assert.equal(apiResponse.json().configuredRepo, null);
+  assert.equal(readyResponse.statusCode, 200);
+  assert.equal(readyResponse.json().dataRoot, "");
+  assert.equal(discoveryResponse.statusCode, 200);
+  assert.deepEqual(discoveryResponse.json().repos, []);
 });
 
 test("api readiness reports ok when the data root is available", async (t) => {
@@ -559,7 +659,7 @@ test("api validates library repositories through the library test endpoint", asy
   assert.equal(body.git.currentBranch, "main");
 });
 
-test("api reports repo context and schedule limitations for selected library repos", async (t) => {
+test("api reports repo context and schedule state for selected library repos", async (t) => {
   const defaultRepo = await createGitBackedContentRepo("dacci-api-library-status-default-", [
     {
       path: "Default Topic/Default Guide.md",
@@ -610,14 +710,13 @@ test("api reports repo context and schedule limitations for selected library rep
   assert.equal(body.isReleaseBranch, true);
   assert.equal(body.remoteName, "origin");
   assert.equal(body.remoteUrl, "git@github.com:mkronvold/Dacci.Example.Content.git");
-  assert.equal(body.schedulerSupported, false);
-  assert.equal(
-    body.schedulerUnsupportedReason,
-    "Background sync scheduling is only available for the configured repository.",
-  );
+  assert.equal(body.schedulerSupported, true);
+  assert.equal(body.scheduler.enabled, false);
+  assert.equal(body.scheduler.paused, false);
+  assert.equal(body.scheduler.intervalMinutes, 15);
 });
 
-test("api rejects background sync schedule changes for selected library repos", async (t) => {
+test("api configures background sync separately for selected library repos", async (t) => {
   const defaultRepo = await createGitBackedContentRepo("dacci-api-library-schedule-default-", [
     {
       path: "Default Topic/Default Guide.md",
@@ -643,20 +742,68 @@ test("api rejects background sync schedule changes for selected library repos", 
     await rm(libraryRepo.repoRoot, { recursive: true, force: true });
   });
 
-  const response = await app.inject({
+  const configureResponse = await app.inject({
     method: "POST",
-    url: "/api/sync/schedule/pause",
+    url: "/api/sync/schedule",
     headers: {
       [repoSelectionHeaderName]: createLibrarySelectionHeader({
         id: "library-example",
         name: "Library Example",
         repoRoot: libraryRepo.repoRoot,
+        releaseBranch: "main",
       }),
+    },
+    payload: {
+      enabled: true,
+      intervalMinutes: 30,
     },
   });
 
-  assert.equal(response.statusCode, 400);
-  assert.match(response.json().message, /only available for the configured repository/i);
+  assert.equal(configureResponse.statusCode, 200);
+  assert.equal(configureResponse.json().status.schedulerSupported, true);
+  assert.equal(configureResponse.json().status.scheduler.enabled, true);
+  assert.equal(configureResponse.json().status.scheduler.intervalMinutes, 30);
+
+  const defaultStatusResponse = await app.inject({
+    method: "GET",
+    url: "/api/sync/status",
+  });
+  assert.equal(defaultStatusResponse.statusCode, 200);
+  assert.equal(defaultStatusResponse.json().scheduler.enabled, false);
+  assert.equal(defaultStatusResponse.json().scheduler.intervalMinutes, 15);
+
+  const libraryStatusResponse = await app.inject({
+    method: "GET",
+    url: "/api/sync/status",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader({
+        id: "library-example",
+        name: "Library Example",
+        repoRoot: libraryRepo.repoRoot,
+        releaseBranch: "main",
+      }),
+    },
+  });
+  assert.equal(libraryStatusResponse.statusCode, 200);
+  assert.equal(libraryStatusResponse.json().schedulerSupported, true);
+  assert.equal(libraryStatusResponse.json().scheduler.enabled, true);
+  assert.equal(libraryStatusResponse.json().scheduler.intervalMinutes, 30);
+
+  const libraryGitInfoEntries = await readdir(path.join(libraryRepo.repoRoot, ".git", "info"));
+  assert.ok(
+    libraryGitInfoEntries.some((entry) => /^dacci-sync-schedule-[0-9a-f]{12}\.json$/.test(entry)),
+    "expected a repo-specific scheduler state file in .git/info",
+  );
+
+  const discoveryResponse = await app.inject({
+    method: "GET",
+    url: "/api/library/discover",
+  });
+  assert.equal(discoveryResponse.statusCode, 200);
+  const discoveredLibraryRepo = discoveryResponse
+    .json()
+    .repos.find((repo) => repo.repoRoot === libraryRepo.repoRoot);
+  assert.equal(discoveredLibraryRepo?.releaseBranch, "main");
 });
 
 test("api rejects library repo selections outside configured library roots", async (t) => {

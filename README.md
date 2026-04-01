@@ -1,6 +1,6 @@
 # Dacci
 
-Dacci is the application for the external `E2Open.KPE.Content` Markdown content repository. This repository contains the API, Web UI, CLI, packaging, and shared libraries; the Markdown content and Git sync history stay in a separate `E2Open.KPE.Content` checkout.
+Dacci is the application for Git-backed Markdown content repositories discovered under the repo-local `workspace/` directory. This repository contains the API, Web UI, CLI, packaging, and shared libraries; each content repo keeps its own Markdown files and Git history in `workspace/<repo-name>`.
 
 ## What this repository provides
 
@@ -18,9 +18,11 @@ Dacci is the application for the external `E2Open.KPE.Content` Markdown content 
 Recommended local layout:
 
 ```text
-workspace/
-├── dacci
-└── E2Open.KPE.Content
+dacci/
+├── workspace/
+│   ├── Dacci.Example.Content
+│   └── E2Open.KPE.Content
+└── ...
 ```
 
 From the Dacci repository root:
@@ -30,11 +32,13 @@ npm install
 npm run dev
 ```
 
-Local defaults already prefer a sibling `../E2Open.KPE.Content` checkout. If your content checkout lives elsewhere, set both runtime paths explicitly:
+Local defaults scan `./workspace` and use the first discovered content repo as the compatibility default when one exists. If `workspace/` is empty, the API and Web UI still start so the browser can guide you to add or clone a repo.
+
+To point the native runtime at a repo outside `workspace/`, set both runtime paths explicitly:
 
 ```bash
-export DATA_ROOT=../E2Open.KPE.Content/data
-export GIT_SYNC_REPO_ROOT=../E2Open.KPE.Content
+export DATA_ROOT=/srv/E2Open.KPE.Content/data
+export GIT_SYNC_REPO_ROOT=/srv/E2Open.KPE.Content
 npm run dev
 ```
 
@@ -62,7 +66,7 @@ npm test
 | Search content | `npm run cli -- search release` |
 | Search by tag | `npm run cli -- search tag:release-notes` |
 | Show sync status | `npm run cli -- sync status` |
-| Show sync status against an explicitly configured content checkout | `DATA_ROOT=../E2Open.KPE.Content/data GIT_SYNC_REPO_ROOT=../E2Open.KPE.Content npm run cli -- sync status` |
+| Show sync status against an explicitly configured content checkout | `DATA_ROOT=/srv/E2Open.KPE.Content/data GIT_SYNC_REPO_ROOT=/srv/E2Open.KPE.Content npm run cli -- sync status` |
 | Enable background pull scheduling | `npm run cli -- sync schedule configure --enable --interval-minutes 15` |
 | Validate Docker Compose config | `npm run docker:config` |
 
@@ -77,7 +81,7 @@ npm test
 
 Storage notes:
 
-- all user content lives under the external `E2Open.KPE.Content/data` tree
+- all user content lives under a Git-backed repo such as `workspace/E2Open.KPE.Content/data`
 - topic-level documents are normalized internally through `CatchAll`
 - the UI and API expose logical paths, not the internal `CatchAll` directory
 - documents can be plain Markdown notes or richer documents with headings, Mermaid diagrams, and optional tags
@@ -167,11 +171,11 @@ Before using the packaged runtime, make sure the host content checkout can alrea
 └── README.md
 ```
 
-The external `E2Open.KPE.Content` checkout lives beside this repo, not inside it.
+Content repos normally live under this repo's gitignored `workspace/` directory.
 
 ## Current constraints
 
 - the Git-backed workspace is still single-writer by design
-- background sync is pull-only and disabled by default
+- background sync is pull-only, per-repo, and disabled by default
 - distributed write coordination is not implemented
 - advanced production platform integrations remain future work

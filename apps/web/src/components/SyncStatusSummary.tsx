@@ -13,35 +13,29 @@ interface InfoListBlockProps {
   tone?: "default" | "danger";
 }
 
-function isConfiguredRepositoryOnlySchedulerReason(reason?: string): boolean {
-  return (reason ?? "").toLowerCase().includes("configured repository");
-}
-
 function getBranchLabel(status: GitSyncStatus): string {
   return status.currentBranch === status.releaseBranch
     ? status.currentBranch
     : `${status.currentBranch} (release: ${status.releaseBranch})`;
 }
 
-function getBackgroundSyncLabel(status: GitSyncStatus): string {
+function getBackgroundPullLabel(status: GitSyncStatus): string {
   if (status.scheduler) {
     if (!status.scheduler.enabled) {
-      return "Background sync off";
+      return "Background pull off";
     }
 
-    return status.scheduler.paused ? "Background sync paused" : `Background sync ${status.scheduler.intervalMinutes}m`;
+    return status.scheduler.paused ? "Background pull paused" : `Background pull ${status.scheduler.intervalMinutes}m`;
   }
 
   if (status.schedulerSupported === false) {
-    return isConfiguredRepositoryOnlySchedulerReason(status.schedulerUnsupportedReason)
-      ? "Only for configured repository"
-      : "Background sync unavailable";
+    return "Background pull unavailable";
   }
 
-  return "Background sync unavailable";
+  return "Background pull unavailable";
 }
 
-function getBackgroundSyncFieldValue(status: GitSyncStatus): string {
+function getBackgroundPullFieldValue(status: GitSyncStatus): string {
   if (status.scheduler) {
     if (!status.scheduler.enabled) {
       return "Disabled";
@@ -51,9 +45,7 @@ function getBackgroundSyncFieldValue(status: GitSyncStatus): string {
   }
 
   if (status.schedulerSupported === false) {
-    return isConfiguredRepositoryOnlySchedulerReason(status.schedulerUnsupportedReason)
-      ? "Only for configured repository"
-      : "Unavailable";
+    return "Unavailable";
   }
 
   return "Unavailable";
@@ -89,10 +81,10 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
     "Dacci sync push only supports content. Commit or clear non-content changes first.",
   );
   const branchLabel = getBranchLabel(props.status);
-  const schedulerLabel = getBackgroundSyncLabel(props.status);
+  const schedulerLabel = getBackgroundPullLabel(props.status);
 
   if (props.variant === "compact") {
-    const repoLabel = props.status.repo?.name ?? "Configured repository";
+    const repoLabel = props.status.repo?.name ?? "Active repository";
 
     return (
       <div className="sync-chip-row">
@@ -127,7 +119,7 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
       <dl className="status-grid compact">
         <div>
           <dt>Repository name</dt>
-          <dd>{props.status.repo?.name ?? "Configured repository"}</dd>
+          <dd>{props.status.repo?.name ?? "Active repository"}</dd>
         </div>
         <div>
           <dt>Repository root</dt>
@@ -158,8 +150,8 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
           <dd className={nonContentChangesBlockPush ? "danger" : undefined}>{props.status.nonContentChangedFiles.length}</dd>
         </div>
         <div>
-          <dt>Background sync</dt>
-          <dd>{getBackgroundSyncFieldValue(props.status)}</dd>
+          <dt>Background pull</dt>
+          <dd>{getBackgroundPullFieldValue(props.status)}</dd>
         </div>
         <div>
           <dt>Next scheduled run</dt>
@@ -218,7 +210,7 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
             ? [props.status.scheduler.pauseReason]
             : []
         }
-        title="Background sync pause reason"
+        title="Background pull pause reason"
         tone="danger"
       />
       <InfoListBlock items={props.status.recommendedActions} title="Recommended actions" />

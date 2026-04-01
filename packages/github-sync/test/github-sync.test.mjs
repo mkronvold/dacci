@@ -498,3 +498,37 @@ test("github sync scheduler pauses when guarded pull blockers are present", asyn
   const localBody = await readFile(path.join(fixture.dataRoot, "Guide.md"), "utf8");
   assert.equal(localBody, "# Guide\n\nLocal draft\n");
 });
+
+test("github sync scheduler can persist state to a custom file", async (t) => {
+  const fixture = await createGitFixture("dacci-github-sync-scheduler-custom-file-");
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  const sync = new GitHubSync({
+    repoRoot: fixture.workRepo,
+    contentRoot: fixture.dataRoot,
+  });
+  const scheduler = new GitHubSyncScheduler(sync, {
+    stateFileName: "dacci-sync-schedule-library.json",
+  });
+
+  await scheduler.configureSchedule({
+    enabled: true,
+    intervalMinutes: 20,
+  });
+  await scheduler.stop();
+
+  const customStatePath = path.join(fixture.workRepo, ".git", "info", "dacci-sync-schedule-library.json");
+  const persistedState = JSON.parse(await readFile(customStatePath, "utf8"));
+  assert.equal(persistedState.enabled, true);
+  assert.equal(persistedState.intervalMinutes, 20);
+
+  await assert.rejects(
+    readFile(path.join(fixture.workRepo, ".git", "info", "dacci-sync-schedule.json"), "utf8"),
+    (error) => {
+      assert.equal(error?.code, "ENOENT");
+      return true;
+    },
+  );
+});

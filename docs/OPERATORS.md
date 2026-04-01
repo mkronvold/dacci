@@ -6,33 +6,36 @@ This guide explains what operators need to know about running the Dacci applicat
 
 | Variable | What it controls | Default |
 | --- | --- | --- |
-| `DATA_ROOT` | content root for the filesystem-backed knowledge base | required runtime path |
-| `GIT_SYNC_REPO_ROOT` | repository root used for guarded git sync | parent of `DATA_ROOT` when unset; sibling `E2Open.KPE.Content` when both defaults are used |
-| `DACCI_LIBRARY_ROOTS` | comma-separated absolute allowlist for custom Library repo roots | empty unless configured; Docker Compose defaults to `/workspace` |
+| `DATA_ROOT` | content root for the filesystem-backed knowledge base | optional; derived from the first discovered workspace repo when unset |
+| `GIT_SYNC_REPO_ROOT` | repository root used for guarded git sync | optional; derived from `DATA_ROOT` when set |
+| `DACCI_LIBRARY_ROOTS` | comma-separated absolute allowlist for custom Library repo roots | repo-local `workspace/` for the packaged runtime; empty elsewhere unless configured |
 | `GIT_SYNC_REMOTE_NAME` | remote used for fetch, pull, and push | `origin` |
 | `GIT_SYNC_RELEASE_BRANCH` | branch used for release guidance | `default` |
 
-When you are not using the default sibling `../E2Open.KPE.Content` checkout, set both `DATA_ROOT` and `GIT_SYNC_REPO_ROOT` explicitly. The public Dacci repo assumes content lives in a separate `E2Open.KPE.Content` checkout.
+When you are not using the default repo-local `workspace/` layout, set both `DATA_ROOT` and `GIT_SYNC_REPO_ROOT` explicitly.
 
 ## Split checkout layout
 
-Recommended working layout, with the Dacci app repo beside the separate `E2Open.KPE.Content` content repo:
+Recommended working layout, with content repos living under the Dacci repo's gitignored workspace:
 
 ```text
-../dacci
-../E2Open.KPE.Content
+./dacci
+./dacci/workspace/E2Open.KPE.Content
+./dacci/workspace/Dacci.Example.Content
 ```
 
 Native API and CLI runs should point into the content checkout:
 
 ```bash
-export DATA_ROOT=../E2Open.KPE.Content/data
-export GIT_SYNC_REPO_ROOT=../E2Open.KPE.Content
+export DATA_ROOT=workspace/E2Open.KPE.Content/data
+export GIT_SYNC_REPO_ROOT=workspace/E2Open.KPE.Content
 ```
 
-The packaged local Docker runtime follows the same rule conceptually: the Dacci API only needs the Git-backed content checkout at runtime. The app code itself comes from the built image. Kubernetes assets are still in the repo, but they are archived reference material rather than the active deployment target for this branch.
+The packaged local Docker runtime follows the same rule conceptually: the Dacci API only needs Git-backed content repos under `/workspace` at runtime. The app code itself comes from the built image. Kubernetes assets are still in the repo, but they are archived reference material rather than the active deployment target for this branch.
 
-Custom Library repos are only accepted when their absolute runtime path lives under `DACCI_LIBRARY_ROOTS`. In Docker Compose, sibling checkouts are now mounted at `/workspace`, so Library entries should use in-container paths such as `/workspace/Dacci.Example.Content`.
+Custom Library repos are only accepted when their absolute runtime path lives under `DACCI_LIBRARY_ROOTS`. In Docker Compose, repo-local checkouts are mounted at `/workspace`, so Library entries should use in-container paths such as `/workspace/Dacci.Example.Content`.
+
+Workspace discovery uses the same direct-child contract under each configured library root: Dacci scans paths like `/workspace/<repo-name>` and only treats them as content repos when they contain Git metadata and a `data/` directory. If no repos are present yet, the packaged runtime still starts so the browser can open the Library panel and guide setup.
 
 ## Git access
 
@@ -40,20 +43,20 @@ The sync layer shells out to `git` and disables interactive prompts. The active 
 
 | Runtime or mode | Operator input | Stored in browser | Stored server-side | Remote shape | Git wiring |
 | --- | --- | --- | --- | --- | --- |
-| Local Docker runtime | host `~/.ssh` or `DACCI_HOST_SSH_DIR`, plus optional `SSH_AUTH_SOCK` | nothing extra | nothing extra | SSH | mounted host SSH config and forwarded agent socket |
+| Local Docker runtime | host `~/.ssh` or `DACCI_HOST_SSH_DIR`, plus optional `SSH_AUTH_SOCK` | nothing extra | nothing extra | SSH | staged copy of host SSH config, with symlinks resolved, plus forwarded agent socket |
 
 The packaged API startup and readiness checks validate the configured content root, the Git repository root used for sync, and any configured SSH command files, so bad path wiring shows up before a later sync failure.
 
 Docker checklist:
 
 - point `DACCI_CONTENT_ROOT` at the external `E2Open.KPE.Content` checkout if it is not cloned beside the Dacci repo
-- point `DACCI_LIBRARY_WORKSPACE_ROOT` at the parent directory that contains any sibling Library checkouts when you need custom repos outside the default split layout
-- let `./scripts/up` mount `"$HOME/.ssh"` by default, or override it with `DACCI_HOST_SSH_DIR`
+- point `DACCI_LIBRARY_WORKSPACE_ROOT` at the parent directory that contains any Library checkouts when you need custom repos outside the default workspace layout
+- let `./scripts/up` stage `"$HOME/.ssh"` by default, or override the source directory with `DACCI_HOST_SSH_DIR`
 - start `./scripts/up` from a shell where `SSH_AUTH_SOCK` is set if your SSH keys rely on an agent
 - keep repo remotes on normal SSH URLs
 - set `GIT_SYNC_REMOTE_URL` only when the runtime should override the repo's saved remote URL
 - optional helper scripts:
-  - `./scripts/up` starts the Compose stack in detached mode, targets a sibling `../E2Open.KPE.Content` checkout by default, mounts the parent workspace at `/workspace`, and binds ports on localhost only
+  - `./scripts/up` starts the Compose stack in detached mode, targets the repo-local `workspace/` tree by default, mounts that workspace at `/workspace`, and binds ports on localhost only
   - `./scripts/down` stops the Compose stack
 
 Archived Kubernetes note:
@@ -87,7 +90,7 @@ Archived Kubernetes note:
 
 | Property | Current behavior |
 | --- | --- |
-| Default state | disabled |
+| Default state | disabled per repo |
 | Automated action | guarded status refresh plus pull only |
 | Auto-push | never |
 | State storage | repository-local Git metadata |

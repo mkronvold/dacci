@@ -1081,6 +1081,8 @@ export interface GitHubSyncSchedulerOptions {
   logger?: GitHubSyncSchedulerLogger;
   maxBackoffMultiplier?: number;
   maxConsecutiveFailuresBeforePause?: number;
+  releaseBranch?: string;
+  stateFileName?: string;
 }
 
 const defaultSchedulerIntervalMinutes = 15;
@@ -1093,6 +1095,8 @@ export class GitHubSyncScheduler {
   private readonly defaultIntervalMinutes: number;
   private readonly maxBackoffMultiplier: number;
   private readonly maxConsecutiveFailuresBeforePause: number;
+  private readonly releaseBranch: string | undefined;
+  private readonly stateFileName: string;
   private readonly gitSync: GitHubSync;
 
   private started = false;
@@ -1118,7 +1122,9 @@ export class GitHubSyncScheduler {
         options.maxConsecutiveFailuresBeforePause ?? defaultMaxConsecutiveFailuresBeforePause,
       ),
     );
-    this.state = createDefaultScheduleState(this.defaultIntervalMinutes);
+    this.releaseBranch = normalizeOptionalScheduleString(options.releaseBranch);
+    this.stateFileName = normalizeScheduleStateFileName(options.stateFileName ?? scheduleStateFileName);
+    this.state = createDefaultScheduleState(this.defaultIntervalMinutes, this.releaseBranch);
   }
 
   public async start(): Promise<void> {
@@ -1287,21 +1293,21 @@ export class GitHubSyncScheduler {
   }
 
   private async loadState(): Promise<void> {
-    this.storagePath = await this.gitSync.getGitPath(path.posix.join("info", scheduleStateFileName));
+    this.storagePath = await this.gitSync.getGitPath(path.posix.join("info", this.stateFileName));
 
     try {
       const rawValue = await readFile(this.storagePath, "utf8");
       const parsed = JSON.parse(rawValue) as unknown;
       // Persisted scheduler state may be stale or hand-edited; normalize it before reuse.
-      this.state = sanitizeScheduleState(parsed, this.defaultIntervalMinutes);
+      this.state = sanitizeScheduleState(parsed, this.defaultIntervalMinutes, this.releaseBranch);
     } catch (error) {
       if (isMissingFileError(error)) {
-        this.state = createDefaultScheduleState(this.defaultIntervalMinutes);
+        this.state = createDefaultScheduleState(this.defaultIntervalMinutes, this.releaseBranch);
         return;
       }
 
       this.logError(`Ignoring invalid persisted background sync state: ${toErrorMessage(error)}`);
-      this.state = createDefaultScheduleState(this.defaultIntervalMinutes);
+      this.state = createDefaultScheduleState(this.defaultIntervalMinutes, this.releaseBranch);
     }
   }
 
@@ -1460,22 +1466,33 @@ export class GitHubSyncScheduler {
   }
 }
 
-function createDefaultScheduleState(intervalMinutes: number): GitSyncScheduleState {
-  return {
+function createDefaultScheduleState(
+  intervalMinutes: number,
+  releaseBranch?: string,
+): GitSyncScheduleState {
+  const state: GitSyncScheduleState = {
     enabled: false,
     paused: false,
     intervalMinutes,
     consecutiveFailures: 0,
   };
+  if (releaseBranch) {
+    state.releaseBranch = releaseBranch;
+  }
+  return state;
 }
 
-function sanitizeScheduleState(rawValue: unknown, defaultIntervalMinutes: number): GitSyncScheduleState {
+function sanitizeScheduleState(
+  rawValue: unknown,
+  defaultIntervalMinutes: number,
+  releaseBranch?: string,
+): GitSyncScheduleState {
   if (!rawValue || typeof rawValue !== "object") {
-    return createDefaultScheduleState(defaultIntervalMinutes);
+    return createDefaultScheduleState(defaultIntervalMinutes, releaseBranch);
   }
 
   const record = rawValue as Record<string, unknown>;
-  const state = createDefaultScheduleState(defaultIntervalMinutes);
+  const state = createDefaultScheduleState(defaultIntervalMinutes, releaseBranch);
 
   if (typeof record.enabled === "boolean") {
     state.enabled = record.enabled;
@@ -1500,6 +1517,13 @@ function sanitizeScheduleState(rawValue: unknown, defaultIntervalMinutes: number
   copyOptionalScheduleString(record, state, "pauseReason");
   copyOptionalScheduleString(record, state, "lastError");
 
+  const persistedReleaseBranch = normalizeOptionalScheduleString(record.releaseBranch);
+  if (releaseBranch) {
+    state.releaseBranch = releaseBranch;
+  } else if (persistedReleaseBranch) {
+    state.releaseBranch = persistedReleaseBranch;
+  }
+
   if (!state.enabled) {
     // Disabled schedules should not retain paused state or a previously queued next run.
     state.paused = false;
@@ -1511,6 +1535,7 @@ function sanitizeScheduleState(rawValue: unknown, defaultIntervalMinutes: number
 }
 
 type GitSyncScheduleStringField =
+  | "releaseBranch"
   | "lastRunAt"
   | "lastStatusCheckAt"
   | "lastPullAt"
@@ -1542,6 +1567,39 @@ function normalizeSchedulerIntervalMinutes(value: unknown): number {
     throw new GitHubSyncError(
       "invalid_configuration",
       "Background sync interval must be a whole number of minutes between 1 and 1440.",
+    );
+  }
+
+  return normalizedValue;
+}
+
+function normalizeOptionalScheduleString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalizedValue = value.trim();
+  return normalizedValue ? normalizedValue : undefined;
+}
+
+function normalizeScheduleStateFileName(value: string): string {
+  const normalizedValue = value.trim();
+  if (!normalizedValue) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      "Background sync state file name is required.",
+    );
+  }
+
+  if (
+    normalizedValue.includes("/") ||
+    normalizedValue.includes("\\") ||
+    normalizedValue === "." ||
+    normalizedValue === ".."
+  ) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      "Background sync state file name must be a simple file name.",
     );
   }
 

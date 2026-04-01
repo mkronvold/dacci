@@ -12,7 +12,7 @@ interface LibraryPaneProps {
   scrollContainerRef: RefObject<HTMLDivElement | null>;
   form: {
     id: string | null;
-    source: "configured" | "saved" | null;
+    source: "configured" | "discovered" | "saved" | null;
     name: string;
     repoRoot: string;
     dataRoot: string;
@@ -25,6 +25,7 @@ interface LibraryPaneProps {
   onCancelEdit: () => void;
   onEditRepo: (repo: SavedLibraryRepoDefinition) => void;
   onExportLibrary: () => void;
+  onRefreshRepositories: () => void;
   onFormDataRootChange: (value: string) => void;
   onFormNameChange: (value: string) => void;
   onFormReleaseBranchChange: (value: string) => void;
@@ -64,27 +65,39 @@ export function LibraryPane(props: LibraryPaneProps) {
 
       <div className="management-pane-scroll" ref={props.scrollContainerRef}>
         <section className="management-card">
-          <h3>Saved repositories</h3>
+          <div className="panel-header">
+            <div>
+              <h3>Available repositories</h3>
+            </div>
+            <div className="inline-actions panel-header-actions">
+              <button className="ghost-button" disabled={props.busy} onClick={props.onRefreshRepositories} type="button">
+                Refresh repositories
+              </button>
+            </div>
+          </div>
           <p className="muted">
-            Library entries point to existing local content-repo checkouts. Dacci keeps the configured runtime repo here too, so every repository is selected the same way.
+            Dacci merges repositories discovered from the current workspace with any repositories saved in this browser.
           </p>
 
           <div className="library-repo-list">
             {props.savedRepos.length === 0 ? (
-              <p className="muted">Loading saved repositories...</p>
+              <p className="muted">No repositories are available yet. Clone one into <code>/workspace</code> or add one manually below.</p>
             ) : (
               props.savedRepos.map((repo) => {
                 const configuredRepo = repo.source === "configured";
+                const discoveredRepo = repo.source === "discovered";
                 return (
                   <article className="library-repo-item" key={repo.id}>
                     <div>
-                       <strong>{repo.name}</strong>
-                       <p className="muted">{repo.repoRoot}</p>
-                       {repo.dataRoot ? <p className="muted">Content root override: {repo.dataRoot}</p> : null}
-                       {repo.releaseBranch ? <p className="muted">Sync branch: {repo.releaseBranch}</p> : null}
-                       {configuredRepo ? (
-                         <p className="muted">Configured by the running Dacci backend.</p>
-                       ) : null}
+                        <strong>{repo.name}</strong>
+                        <p className="muted">{repo.repoRoot}</p>
+                        {repo.dataRoot ? <p className="muted">Content root override: {repo.dataRoot}</p> : null}
+                        {repo.releaseBranch ? <p className="muted">Sync branch: {repo.releaseBranch}</p> : null}
+                        {configuredRepo ? (
+                          <p className="muted">Provided by the running Dacci backend.</p>
+                        ) : discoveredRepo ? (
+                          <p className="muted">Discovered from the current Dacci workspace.</p>
+                        ) : null}
                     </div>
                     <div className="inline-actions">
                       <button
@@ -98,7 +111,7 @@ export function LibraryPane(props: LibraryPaneProps) {
                       <button className="ghost-button" disabled={props.busy} onClick={() => props.onEditRepo(repo)} type="button">
                         Edit
                       </button>
-                      {!configuredRepo ? (
+                      {!configuredRepo && !discoveredRepo ? (
                         <button
                           className="ghost-button danger"
                           disabled={props.busy}
@@ -119,7 +132,7 @@ export function LibraryPane(props: LibraryPaneProps) {
         <section className="management-card" ref={props.editSectionRef}>
           <h3>{editing ? "Edit repository" : "Add repository"}</h3>
           <p className="muted">
-            Add an existing content repository. To create a Content Repo:{" "}
+            Add an existing content repository. In Docker, prefer the in-container path such as <code>/workspace/Dacci.Example.Content</code>. To create a Content Repo:{" "}
             <a href={props.createContentRepoGuideUrl} rel="noreferrer" target="_blank">
               Dacci example repo README
             </a>
@@ -127,7 +140,11 @@ export function LibraryPane(props: LibraryPaneProps) {
           </p>
           {editingConfiguredRepo ? (
             <p className="muted">
-              This repository is managed by the running Dacci backend, so its paths and branch stay fixed.
+              This repository is provided by the running Dacci backend, so its paths and branch stay fixed.
+            </p>
+          ) : props.form.source === "discovered" ? (
+            <p className="muted">
+              This repository was discovered from the current workspace. Save changes here to keep a browser-local override.
             </p>
           ) : null}
           <div className="form-grid">

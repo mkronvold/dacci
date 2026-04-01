@@ -28,21 +28,25 @@ interface SyncPaneProps {
   onResumeSyncSchedule: () => void;
 }
 
-function isConfiguredRepositoryOnlySchedulerReason(reason?: string): boolean {
-  return (reason ?? "").toLowerCase().includes("configured repository");
-}
-
 export function SyncPane(props: SyncPaneProps) {
+  const pullAvailable = Boolean(props.syncStatus) && !props.busy && (props.syncStatus?.pullBlockers.length ?? 0) === 0;
+  const hasChangesToPull = (props.syncStatus?.behind ?? 0) > 0;
   const pushAvailable =
     Boolean(props.syncStatus) &&
     !props.busy &&
     props.syncPushMessage.trim().length > 0 &&
     (props.syncStatus?.pushBlockers.length ?? 0) === 0;
-  const hasContentToPush = (props.syncStatus?.changedFiles.length ?? 0) > 0;
+  const hasChangesToPush =
+    Boolean(props.syncStatus) && ((props.syncStatus?.changedFiles.length ?? 0) > 0 || (props.syncStatus?.ahead ?? 0) > 0);
   const scheduleSupported = props.syncStatus?.schedulerSupported !== false;
   const showGitAccessGuidance = isLikelyGitAuthenticationError(props.syncError);
+  const syncPullButtonClassName = pullAvailable && hasChangesToPull
+    ? "primary-button sync-pull-button ready"
+    : pullAvailable
+      ? "ghost-button sync-pull-button available"
+      : "ghost-button sync-pull-button unavailable";
   const syncPushButtonClassName = pushAvailable
-    ? hasContentToPush
+    ? hasChangesToPush
       ? "primary-button sync-push-button ready"
       : "ghost-button sync-push-button available"
     : "ghost-button sync-push-button unavailable";
@@ -86,13 +90,23 @@ export function SyncPane(props: SyncPaneProps) {
               <button className="ghost-button" disabled={props.busy} onClick={props.onRefreshSync} type="button">
                 Refresh status
               </button>
+              {hasChangesToPull ? (
+                <button
+                  className={syncPullButtonClassName}
+                  disabled={!pullAvailable}
+                  onClick={props.onSyncPull}
+                  type="button"
+                >
+                  Pull
+                </button>
+              ) : null}
               <button
                 className={syncPushButtonClassName}
                 disabled={!pushAvailable}
                 onClick={props.onSyncPush}
                 type="button"
               >
-                Push sync
+                Push
               </button>
             </div>
           </div>
@@ -107,7 +121,7 @@ export function SyncPane(props: SyncPaneProps) {
 
         {props.syncStatus ? (
           <section className="management-card">
-            <h3>Push and schedule</h3>
+            <h3>Pull, push, and background pull</h3>
             <div className="form-grid">
               <label>
                 <span>Push message</span>
@@ -120,12 +134,12 @@ export function SyncPane(props: SyncPaneProps) {
 
               <div className="inline-actions">
                 <button
-                  className="ghost-button"
-                  disabled={props.busy || props.syncStatus.pullBlockers.length > 0}
+                  className={syncPullButtonClassName}
+                  disabled={!pullAvailable}
                   onClick={props.onSyncPull}
                   type="button"
                 >
-                  Pull content
+                  Pull
                 </button>
                 <button
                   className={syncPushButtonClassName}
@@ -133,12 +147,12 @@ export function SyncPane(props: SyncPaneProps) {
                   onClick={props.onSyncPush}
                   type="button"
                 >
-                  Push content
+                  Push
                 </button>
               </div>
 
               <label>
-                <span>Background sync</span>
+                <span>Background pull</span>
                 <select
                   disabled={!scheduleSupported || props.busy}
                   onChange={(event) => props.onSyncScheduleEnabledChange(event.target.value === "enabled")}
@@ -186,10 +200,8 @@ export function SyncPane(props: SyncPaneProps) {
 
               <p className="muted">
                 {scheduleSupported
-                  ? "Background sync only performs guarded pulls. Push remains manual, and conflicts or blockers pause the schedule."
-                  : isConfiguredRepositoryOnlySchedulerReason(props.syncStatus.schedulerUnsupportedReason)
-                    ? "Only for configured repository"
-                    : props.syncStatus.schedulerUnsupportedReason ?? "Background sync scheduling is unavailable for this repository."}
+                  ? "Background pull only performs guarded pulls. Push remains manual, and conflicts or blockers pause the schedule."
+                  : props.syncStatus.schedulerUnsupportedReason ?? "Background pull scheduling is unavailable in this runtime."}
               </p>
             </div>
           </section>

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { ContentEngine } from "@dacci/content-engine";
@@ -7,9 +8,14 @@ import { GitHubSync, GitHubSyncError, type GitHubSyncOptions } from "@dacci/gith
 import type { LibraryRepoDefinition, RepoContextSummary, RepoSelection } from "@dacci/shared-types";
 import { configuredRepoId } from "@dacci/shared-types";
 
+import {
+  readPersistedScheduleReleaseBranch,
+  resolveGitDirPath,
+} from "./scheduleState.js";
+
 export interface RepoContextResolverOptions {
-  defaultDataRoot: string;
-  defaultRepoRoot: string;
+  defaultDataRoot?: string;
+  defaultRepoRoot?: string;
   gitSyncRemoteName?: string;
   gitSyncRemoteUrl?: string;
   gitSyncReleaseBranch?: string;
@@ -26,23 +32,27 @@ export interface ResolvedRepoContext {
 }
 
 export class RepoContextResolver {
-  private readonly defaultDataRoot: string;
-  private readonly defaultRepoRoot: string;
+  private readonly defaultDataRoot: string | null;
+  private readonly defaultRepoRoot: string | null;
   private readonly gitSyncRemoteName: string | undefined;
   private readonly gitSyncRemoteUrl: string | undefined;
   private readonly gitSyncReleaseBranch: string | undefined;
   private readonly libraryRepoRoots: string[];
 
   public constructor(options: RepoContextResolverOptions) {
-    this.defaultDataRoot = path.resolve(options.defaultDataRoot);
-    this.defaultRepoRoot = path.resolve(options.defaultRepoRoot);
+    this.defaultDataRoot = options.defaultDataRoot ? path.resolve(options.defaultDataRoot) : null;
+    this.defaultRepoRoot = options.defaultRepoRoot ? path.resolve(options.defaultRepoRoot) : null;
     this.gitSyncRemoteName = options.gitSyncRemoteName?.trim() || undefined;
     this.gitSyncRemoteUrl = options.gitSyncRemoteUrl?.trim() || undefined;
     this.gitSyncReleaseBranch = options.gitSyncReleaseBranch?.trim() || undefined;
     this.libraryRepoRoots = [...new Set((options.libraryRepoRoots ?? []).map((entry) => path.resolve(entry)))];
   }
 
-  public getDefaultSummary(): RepoContextSummary {
+  public getDefaultSummary(): RepoContextSummary | null {
+    if (!this.defaultDataRoot || !this.defaultRepoRoot) {
+      return null;
+    }
+
     const releaseBranch = resolveReleaseBranch(this.gitSyncReleaseBranch);
     return {
       id: configuredRepoId,
@@ -57,6 +67,18 @@ export class RepoContextResolver {
 
   public getConfiguredLibraryRoots(): string[] {
     return [...this.libraryRepoRoots];
+  }
+
+  public async discoverLibraryRepos(): Promise<RepoContextSummary[]> {
+    const discoveredRepos = new Map<string, RepoContextSummary>();
+
+    for (const rootPath of this.libraryRepoRoots) {
+      for (const summary of await this.discoverLibraryReposInRoot(rootPath)) {
+        discoveredRepos.set(summary.repoRoot, summary);
+      }
+    }
+
+    return [...discoveredRepos.values()].sort(compareRepoContextSummaries);
   }
 
   public async validateConfiguredLibraryRoots(): Promise<void> {
@@ -110,6 +132,13 @@ export class RepoContextResolver {
   private resolveSelection(selection: RepoSelection): ResolvedRepoContext {
     if (selection.kind === "default") {
       const defaultSummary = this.getDefaultSummary();
+      if (!defaultSummary || !this.defaultDataRoot || !this.defaultRepoRoot) {
+        throw new GitHubSyncError(
+          "invalid_configuration",
+          "No content repository is selected yet. Clone one into the workspace or add one in the Library panel first.",
+        );
+      }
+
       return this.createContext({
         summary: defaultSummary,
         repoRoot: this.defaultRepoRoot,
@@ -122,19 +151,32 @@ export class RepoContextResolver {
     const normalizedRepo = normalizeLibraryRepoDefinition(selection.repo);
     const repoRoot = normalizedRepo.repoRoot;
     const dataRoot = normalizedRepo.dataRoot ? normalizedRepo.dataRoot : path.join(repoRoot, "data");
-    const releaseBranch = resolveReleaseBranch(normalizedRepo.releaseBranch, this.gitSyncReleaseBranch);
     ensurePathInside(repoRoot, dataRoot, "Content root");
 
     const defaultSummary = this.getDefaultSummary();
-    if (
+    const defaultRepoSelection =
+      defaultSummary !== null &&
       repoRoot === this.defaultRepoRoot &&
-      dataRoot === this.defaultDataRoot &&
+      dataRoot === this.defaultDataRoot;
+    const persistedReleaseBranch =
+      normalizedRepo.releaseBranch ||
+      (!defaultRepoSelection && this.isRepoRootAllowed(repoRoot)
+        ? readPersistedScheduleReleaseBranch({
+            isDefault: false,
+            repoRoot,
+            dataRoot,
+          })
+        : undefined);
+    const releaseBranch = resolveReleaseBranch(persistedReleaseBranch, this.gitSyncReleaseBranch);
+    if (
+      defaultRepoSelection &&
+      defaultSummary &&
       releaseBranch === defaultSummary.releaseBranch
     ) {
       return this.createContext({
         summary: defaultSummary,
-        repoRoot: this.defaultRepoRoot,
-        dataRoot: this.defaultDataRoot,
+        repoRoot: this.defaultRepoRoot!,
+        dataRoot: this.defaultDataRoot!,
         isDefault: true,
         releaseBranch,
       });
@@ -205,10 +247,63 @@ export class RepoContextResolver {
   private isRepoRootAllowed(repoRoot: string): boolean {
     return this.libraryRepoRoots.some((rootPath) => isSameOrInside(rootPath, repoRoot));
   }
+
+  private async discoverLibraryReposInRoot(rootPath: string): Promise<RepoContextSummary[]> {
+    let entries;
+    try {
+      entries = await readdir(rootPath, {
+        withFileTypes: true,
+      });
+    } catch {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Configured library root '${rootPath}' does not exist or is not accessible.`,
+      );
+    }
+
+    const discoveredRepos = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.name.startsWith(".")) {
+          return null;
+        }
+
+        const repoRoot = path.join(rootPath, entry.name);
+        if (!(await isDirectoryPath(repoRoot))) {
+          return null;
+        }
+
+        return this.discoverLibraryRepo(repoRoot);
+      }),
+    );
+
+    return discoveredRepos.filter((entry): entry is RepoContextSummary => entry !== null);
+  }
+
+  private async discoverLibraryRepo(repoRoot: string): Promise<RepoContextSummary | null> {
+    const dataRoot = path.join(repoRoot, "data");
+    const gitConfigPath = resolveGitConfigPath(repoRoot);
+    if (!gitConfigPath || !(await isFilePath(gitConfigPath)) || !(await isDirectoryPath(dataRoot))) {
+      return null;
+    }
+
+    try {
+      return this.resolveLibraryRepo({
+        id: buildDiscoveredRepoId(repoRoot),
+        name: buildRepoRootFallbackName(repoRoot),
+        repoRoot,
+      }).summary;
+    } catch (error) {
+      if (error instanceof GitHubSyncError && error.code === "invalid_configuration") {
+        return null;
+      }
+
+      throw error;
+    }
+  }
 }
 
 export function parseConfiguredLibraryRoots(
-  defaultRepoRoot: string,
+  defaultRepoRoot?: string,
   configuredValue?: string,
 ): string[] {
   const normalizedValue = configuredValue?.trim();
@@ -218,6 +313,10 @@ export function parseConfiguredLibraryRoots(
       .map((entry) => entry.trim())
       .filter(Boolean)
       .map((entry) => path.resolve(entry));
+  }
+
+  if (!defaultRepoRoot) {
+    return [];
   }
 
   const defaultParent = path.dirname(path.resolve(defaultRepoRoot));
@@ -361,6 +460,22 @@ function isSameOrInside(rootPath: string, candidatePath: string): boolean {
   return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
 }
 
+async function isDirectoryPath(candidatePath: string): Promise<boolean> {
+  try {
+    return (await stat(candidatePath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function isFilePath(candidatePath: string): Promise<boolean> {
+  try {
+    return (await stat(candidatePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function buildConfiguredRepoName(repoRoot: string, remoteUrl?: string, remoteName?: string): string {
   const remoteSlug = parseRemoteRepositorySlug(remoteUrl) ?? readRepositoryRemoteSlug(repoRoot, remoteName);
   if (remoteSlug) {
@@ -384,7 +499,26 @@ function buildRepoRootFallbackName(repoRoot: string): string {
   const basename = path.basename(repoRoot);
   return basename && basename !== "." && basename !== path.parse(repoRoot).root && basename !== "workspace"
     ? basename
-    : "Configured repository";
+    : "Content repository";
+}
+
+function buildDiscoveredRepoId(repoRoot: string): string {
+  return `discovered-${createHash("sha1").update(repoRoot).digest("hex").slice(0, 12)}`;
+}
+
+function compareRepoContextSummaries(left: RepoContextSummary, right: RepoContextSummary): number {
+  if (left.isDefault !== right.isDefault) {
+    return left.isDefault ? -1 : 1;
+  }
+
+  const nameComparison = left.name.localeCompare(right.name, undefined, {
+    sensitivity: "base",
+  });
+  if (nameComparison !== 0) {
+    return nameComparison;
+  }
+
+  return left.repoRoot.localeCompare(right.repoRoot);
 }
 
 function resolveReleaseBranch(explicitReleaseBranch?: string, fallbackReleaseBranch?: string): string {
@@ -440,21 +574,14 @@ function readRepositoryRemoteSlug(repoRoot: string, remoteName?: string): string
 }
 
 function resolveGitConfigPath(repoRoot: string): string | undefined {
-  const gitPath = path.join(repoRoot, ".git");
+  const gitDirPath = resolveGitDirPath(repoRoot);
+  if (!gitDirPath) {
+    return undefined;
+  }
 
   try {
-    const gitStats = statSync(gitPath);
-    if (gitStats.isDirectory()) {
-      return path.join(gitPath, "config");
-    }
-
-    if (!gitStats.isFile()) {
-      return undefined;
-    }
-
-    const gitFileContents = readFileSync(gitPath, "utf8");
-    const gitDir = gitFileContents.match(/^gitdir:\s*(.+)\s*$/im)?.[1]?.trim();
-    return gitDir ? path.join(path.resolve(repoRoot, gitDir), "config") : undefined;
+    const configPath = path.join(gitDirPath, "config");
+    return statSync(configPath).isFile() ? configPath : undefined;
   } catch {
     return undefined;
   }

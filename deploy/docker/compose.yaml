@@ -6,8 +6,8 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 3000
-      DATA_ROOT: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}/data
-      GIT_SYNC_REPO_ROOT: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}
+      DATA_ROOT: ${DACCI_RUNTIME_DATA_ROOT:-}
+      GIT_SYNC_REPO_ROOT: ${DACCI_RUNTIME_GIT_SYNC_REPO_ROOT:-}
       GIT_SYNC_REMOTE_URL: ${GIT_SYNC_REMOTE_URL:-}
       DACCI_LIBRARY_ROOTS: ${DACCI_LIBRARY_ROOTS:-/workspace}
       SSH_AUTH_SOCK: ${DACCI_SSH_AUTH_SOCK:-}
@@ -16,14 +16,14 @@ services:
     restart: unless-stopped
     volumes:
       - type: bind
-        source: ${DACCI_LIBRARY_WORKSPACE_ROOT:-../../../}
+        source: ${DACCI_LIBRARY_WORKSPACE_ROOT:-../../workspace}
         target: /workspace
       - type: bind
-        source: ${DACCI_CONTENT_ROOT:-../../../E2Open.KPE.Content}/data
-        target: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}/data
+        source: ${DACCI_CONTENT_ROOT:-../../workspace/.dacci-empty-content}/data
+        target: /workspace/${DACCI_CONTENT_REPO_NAME:-.dacci-empty-content}/data
       - type: bind
         source: ${DACCI_HOST_SSH_DIR:-./git-ssh}
-        target: /root/.ssh
+        target: /var/run/dacci-host-ssh
         read_only: true
       - type: bind
         source: ${DACCI_SSH_AUTH_SOCK_DIR:-/tmp/dacci-empty-ssh-agent}

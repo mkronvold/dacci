@@ -208,6 +208,7 @@ export interface GitSyncScheduleState {
   paused: boolean;
   intervalMinutes: number;
   consecutiveFailures: number;
+  releaseBranch?: string;
   lastRunAt?: string;
   lastStatusCheckAt?: string;
   lastPullAt?: string;
@@ -303,7 +304,7 @@ export interface LibraryRepoDefinition {
 }
 
 export interface SavedLibraryRepoDefinition extends LibraryRepoDefinition {
-  source?: "configured" | "saved";
+  source?: "configured" | "discovered" | "saved";
 }
 
 export interface DefaultRepoSelection {
@@ -337,7 +338,7 @@ export interface ApiInfoResponse {
   phase: string;
   service: string;
   endpoints: string[];
-  configuredRepo: RepoContextSummary;
+  configuredRepo: RepoContextSummary | null;
 }
 
 export interface ApiErrorResponse {
@@ -358,4 +359,9 @@ export interface LibraryRepoTestResponse {
     contentPath: string;
     currentBranch: string;
   };
+}
+
+export interface LibraryRepoDiscoveryResponse {
+  libraryRoots: string[];
+  repos: RepoContextSummary[];
 }

@@ -8,7 +8,6 @@ import {
 import {
   GitHubSync,
   GitHubSyncError,
-  GitHubSyncScheduler,
   type GitHubSyncOptions,
   isGitHubSyncError,
 } from "@dacci/github-sync";
@@ -29,6 +28,7 @@ import type {
   GitSyncStatus,
   HealthCheckResponse,
   ImportDocumentsRequest,
+  LibraryRepoDiscoveryResponse,
   LibraryRepoTestRequest,
   LibraryRepoTestResponse,
   MoveDocumentRequest,
@@ -42,10 +42,11 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyRequest } from "fastify";
 
 import { RepoContextResolver, type ResolvedRepoContext } from "./repoContext.js";
+import { RepoSyncSchedulerRegistry } from "./schedulerRegistry.js";
 
 export interface BuildAppOptions {
-  dataRoot: string;
-  gitSyncRepoRoot: string;
+  dataRoot?: string;
+  gitSyncRepoRoot?: string;
   gitSyncRemoteName?: string;
   gitSyncRemoteUrl?: string;
   gitSshCommand?: string;
@@ -61,13 +62,36 @@ export async function buildApp(options: BuildAppOptions) {
     logger: true,
   });
   const repoContextResolver = createRepoContextResolver(options);
-  const defaultGitSync = createGitSync(options);
-  const gitSyncScheduler = new GitHubSyncScheduler(defaultGitSync, {
-    logger: {
-      info: (message) => app.log.info({ subsystem: "background-sync" }, message),
-      warn: (message) => app.log.warn({ subsystem: "background-sync" }, message),
-      error: (message) => app.log.error({ subsystem: "background-sync" }, message),
-    },
+  const syncSchedulerRegistry = new RepoSyncSchedulerRegistry(repoContextResolver, {
+    createLogger: (repoContext) => ({
+      info: (message) =>
+        app.log.info(
+          {
+            subsystem: "background-sync",
+            repoId: repoContext.summary.id,
+            repoName: repoContext.summary.name,
+          },
+          message,
+        ),
+      warn: (message) =>
+        app.log.warn(
+          {
+            subsystem: "background-sync",
+            repoId: repoContext.summary.id,
+            repoName: repoContext.summary.name,
+          },
+          message,
+        ),
+      error: (message) =>
+        app.log.error(
+          {
+            subsystem: "background-sync",
+            repoId: repoContext.summary.id,
+            repoName: repoContext.summary.name,
+          },
+          message,
+        ),
+    }),
   });
 
   await app.register(cors, {
@@ -76,9 +100,9 @@ export async function buildApp(options: BuildAppOptions) {
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
-  await gitSyncScheduler.start();
+  await syncSchedulerRegistry.start();
   app.addHook("onClose", async () => {
-    await gitSyncScheduler.stop();
+    await syncSchedulerRegistry.stop();
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -112,20 +136,31 @@ export async function buildApp(options: BuildAppOptions) {
   app.get("/health", async (): Promise<HealthCheckResponse> => ({
     status: "ok",
     service: apiServiceSlug,
-    dataRoot: options.dataRoot,
+    dataRoot: repoContextResolver.getDefaultSummary()?.dataRoot ?? "",
   }));
 
   app.get("/ready", async (request): Promise<HealthCheckResponse> => {
-    const repoContext = resolveRepoContext(repoContextResolver, request);
-    await validateReadyRuntime(
-      repoContext.createEngine(),
-      repoContext.createGitSync(),
-      options.gitSshCommand,
-    );
+    const defaultSummary = repoContextResolver.getDefaultSummary();
+    const repoSelectionHeader = request.headers[repoSelectionHeaderName];
+    if (hasExplicitRepoSelectionHeader(repoSelectionHeader) || defaultSummary) {
+      const repoContext = resolveRepoContext(repoContextResolver, request);
+      await validateReadyRuntime(
+        repoContext.createEngine(),
+        repoContext.createGitSync(),
+        options.gitSshCommand,
+      );
+      return {
+        status: "ok",
+        service: apiServiceSlug,
+        dataRoot: repoContext.dataRoot,
+      };
+    }
+
+    await ensureGitSshCommandFilesPresent(options.gitSshCommand);
     return {
       status: "ok",
       service: apiServiceSlug,
-      dataRoot: repoContext.dataRoot,
+      dataRoot: "",
     };
   });
 
@@ -141,6 +176,7 @@ export async function buildApp(options: BuildAppOptions) {
       "/api/search",
       "/api/summary",
       "/api/documents",
+      "/api/library/discover",
       "/api/library/test",
       "/api/import/documents",
       "/api/export",
@@ -153,6 +189,11 @@ export async function buildApp(options: BuildAppOptions) {
       "/api/sync/schedule/pause",
       "/api/sync/schedule/resume",
     ],
+  }));
+
+  app.get("/api/library/discover", async (): Promise<LibraryRepoDiscoveryResponse> => ({
+    libraryRoots: repoContextResolver.getConfiguredLibraryRoots(),
+    repos: await repoContextResolver.discoverLibraryRepos(),
   }));
 
   app.get("/api/tree", async (request) => resolveRepoContext(repoContextResolver, request).createEngine().getTree());
@@ -178,58 +219,29 @@ export async function buildApp(options: BuildAppOptions) {
   app.get<{ Querystring: { refresh?: string } }>("/api/sync/status", async (request) => {
     const repoContext = resolveRepoContext(repoContextResolver, request);
     const refreshRemote = request.query.refresh === "true";
-    if (repoContext.isDefault && gitSyncScheduler) {
-      return decorateGitSyncStatus(
-        await gitSyncScheduler.getStatus({
-          refreshRemote,
-        }),
-        repoContext,
-        gitSyncScheduler !== null,
-      );
-    }
-
-    const gitSync = repoContext.createGitSync();
-    return decorateGitSyncStatus(
-      await gitSync.getStatus({ refreshRemote }),
-      repoContext,
-      gitSyncScheduler !== null && repoContext.isDefault,
-      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
-    );
+    const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
+    return decorateGitSyncStatus(await gitSyncScheduler.getStatus({ refreshRemote }), repoContext);
   });
 
   app.post("/api/sync/pull", async (request): Promise<GitSyncOperationResponse> => {
     const repoContext = resolveRepoContext(repoContextResolver, request);
-    if (repoContext.isDefault && gitSyncScheduler) {
-      return decorateGitSyncOperationResponse(await gitSyncScheduler.pullContent(), repoContext, true);
-    }
+    const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
 
-    return decorateGitSyncOperationResponse(
-      await repoContext.createGitSync().pullContent(),
-      repoContext,
-      false,
-      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
-    );
+    return decorateGitSyncOperationResponse(await gitSyncScheduler.pullContent(), repoContext);
   });
 
   app.post<{ Body: GitSyncPushRequest }>("/api/sync/push", async (request): Promise<GitSyncOperationResponse> => {
     const repoContext = resolveRepoContext(repoContextResolver, request);
-    if (repoContext.isDefault && gitSyncScheduler) {
-      return decorateGitSyncOperationResponse(await gitSyncScheduler.pushContent(request.body), repoContext, true);
-    }
+    const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
 
-    return decorateGitSyncOperationResponse(
-      await repoContext.createGitSync().pushContent(request.body),
-      repoContext,
-      false,
-      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
-    );
+    return decorateGitSyncOperationResponse(await gitSyncScheduler.pushContent(request.body), repoContext);
   });
 
   app.post<{ Body: GitSyncScheduleConfigureRequest }>(
     "/api/sync/schedule",
     async (request): Promise<GitSyncScheduleResponse> => {
       const repoContext = resolveRepoContext(repoContextResolver, request);
-      ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+      const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
       return decorateGitSyncScheduleResponse(
         await gitSyncScheduler.configureSchedule(request.body ?? {}),
         repoContext,
@@ -239,13 +251,13 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.post("/api/sync/schedule/pause", async (request): Promise<GitSyncScheduleResponse> => {
     const repoContext = resolveRepoContext(repoContextResolver, request);
-    ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+    const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
     return decorateGitSyncScheduleResponse(await gitSyncScheduler.pauseSchedule(), repoContext);
   });
 
   app.post("/api/sync/schedule/resume", async (request): Promise<GitSyncScheduleResponse> => {
     const repoContext = resolveRepoContext(repoContextResolver, request);
-    ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+    const gitSyncScheduler = await syncSchedulerRegistry.getScheduler(repoContext);
     return decorateGitSyncScheduleResponse(await gitSyncScheduler.resumeSchedule(), repoContext);
   });
 
@@ -345,20 +357,29 @@ export async function buildApp(options: BuildAppOptions) {
 }
 
 export async function validateAppRuntimeConfiguration(options: BuildAppOptions): Promise<void> {
+  if ((options.dataRoot && !options.gitSyncRepoRoot) || (!options.dataRoot && options.gitSyncRepoRoot)) {
+    throw new Error("DATA_ROOT and GIT_SYNC_REPO_ROOT must be set together.");
+  }
+
   const repoContextResolver = createRepoContextResolver(options);
-  const gitSync = createGitSync(options);
-  await Promise.all([
-    gitSync.validateConfiguration(),
-    repoContextResolver.validateConfiguredLibraryRoots(),
-  ]);
+  if (options.dataRoot && options.gitSyncRepoRoot) {
+    const gitSync = createGitSync(options);
+    await Promise.all([
+      gitSync.validateConfiguration(),
+      repoContextResolver.validateConfiguredLibraryRoots(),
+    ]);
+  } else {
+    await repoContextResolver.validateConfiguredLibraryRoots();
+  }
   await ensureGitSshCommandFilesPresent(options.gitSshCommand);
 }
 
 function createRepoContextResolver(options: BuildAppOptions): RepoContextResolver {
-  const repoContextOptions: ConstructorParameters<typeof RepoContextResolver>[0] = {
-    defaultDataRoot: options.dataRoot,
-    defaultRepoRoot: options.gitSyncRepoRoot,
-  };
+  const repoContextOptions: ConstructorParameters<typeof RepoContextResolver>[0] = {};
+  if (options.dataRoot && options.gitSyncRepoRoot) {
+    repoContextOptions.defaultDataRoot = options.dataRoot;
+    repoContextOptions.defaultRepoRoot = options.gitSyncRepoRoot;
+  }
   if (options.gitSyncRemoteName) {
     repoContextOptions.gitSyncRemoteName = options.gitSyncRemoteName;
   }
@@ -376,6 +397,10 @@ function createRepoContextResolver(options: BuildAppOptions): RepoContextResolve
 }
 
 function createGitSync(options: BuildAppOptions): GitHubSync {
+  if (!options.gitSyncRepoRoot || !options.dataRoot) {
+    throw new Error("Git sync runtime requires both DATA_ROOT and GIT_SYNC_REPO_ROOT.");
+  }
+
   const gitSyncOptions: GitHubSyncOptions = {
     repoRoot: options.gitSyncRepoRoot,
     contentRoot: options.dataRoot,
@@ -400,52 +425,21 @@ function resolveRepoContext(
   return repoContextResolver.resolveRequestSelection(request.headers[repoSelectionHeaderName]);
 }
 
-function ensureSchedulerAvailable(
-  repoContext: ResolvedRepoContext,
-  gitSyncScheduler: GitHubSyncScheduler | null,
-): asserts gitSyncScheduler is GitHubSyncScheduler {
-  if (!repoContext.isDefault) {
-    throw new GitHubSyncError(
-      "invalid_configuration",
-      "Background sync scheduling is only available for the configured repository.",
-    );
+function hasExplicitRepoSelectionHeader(headerValue: string | string[] | undefined): boolean {
+  if (Array.isArray(headerValue)) {
+    return headerValue.length > 0;
   }
 
-  if (!gitSyncScheduler) {
-    throw new GitHubSyncError(
-      "invalid_configuration",
-      buildSchedulerUnsupportedReason(repoContext, false),
-    );
-  }
-}
-
-function buildSchedulerUnsupportedReason(
-  repoContext: ResolvedRepoContext,
-  schedulerAvailable: boolean,
-): string {
-  if (schedulerAvailable) {
-    return "Background sync scheduling is only available for the configured repository.";
-  }
-
-  return repoContext.isDefault
-    ? "Background sync scheduling is unavailable in this runtime."
-    : "Background sync scheduling is only available for the configured repository.";
+  return Boolean(headerValue?.trim());
 }
 
 function decorateGitSyncOperationResponse(
   response: GitSyncOperationResponse,
   repoContext: ResolvedRepoContext,
-  schedulerSupported: boolean,
-  schedulerUnsupportedReason?: string,
 ): GitSyncOperationResponse {
   return {
     ...response,
-    status: decorateGitSyncStatus(
-      response.status,
-      repoContext,
-      schedulerSupported,
-      schedulerUnsupportedReason,
-    ),
+    status: decorateGitSyncStatus(response.status, repoContext),
   };
 }
 
@@ -455,27 +449,19 @@ function decorateGitSyncScheduleResponse(
 ): GitSyncScheduleResponse {
   return {
     ...response,
-    status: decorateGitSyncStatus(response.status, repoContext, true),
+    status: decorateGitSyncStatus(response.status, repoContext),
   };
 }
 
 function decorateGitSyncStatus(
   status: GitSyncStatus,
   repoContext: ResolvedRepoContext,
-  schedulerSupported: boolean,
-  schedulerUnsupportedReason?: string,
 ): GitSyncStatus {
-  const decoratedStatus: GitSyncStatus = {
+  return {
     ...status,
     repo: repoContext.summary,
-    schedulerSupported,
+    schedulerSupported: true,
   };
-  if (!schedulerSupported) {
-    decoratedStatus.schedulerUnsupportedReason =
-      schedulerUnsupportedReason ?? "Background sync scheduling is only available for the configured repository.";
-  }
-
-  return decoratedStatus;
 }
 
 async function validateReadyRuntime(

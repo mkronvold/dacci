@@ -55,7 +55,11 @@ COPY --from=build /app/apps/api/dist apps/api/dist
 COPY --from=build /app/packages/content-engine/dist packages/content-engine/dist
 COPY --from=build /app/packages/github-sync/dist packages/github-sync/dist
 COPY --from=build /app/packages/shared-types/dist packages/shared-types/dist
+COPY deploy/docker/api-entrypoint.sh /usr/local/bin/dacci-api-entrypoint.sh
+
+RUN chmod 755 /usr/local/bin/dacci-api-entrypoint.sh
 
 EXPOSE 3000
 
+ENTRYPOINT ["/usr/local/bin/dacci-api-entrypoint.sh"]
 CMD ["npm", "run", "start", "--workspace", "@dacci/api"]
