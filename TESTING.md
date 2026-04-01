@@ -28,8 +28,6 @@ npm test
 | `npm run build` | Production builds for all workspaces, including the Vite web build |
 | `npm test` | Full build plus `node:test` suites for content engine, sync, API, and CLI |
 | `npm run docker:config` | Docker Compose configuration validity |
-| `npm run k8s:render` | Kubernetes manifest rendering through kustomize |
-| `npm run k8s:validate` | Intended client-side Kubernetes dry-run validation |
 
 Important:
 
@@ -54,7 +52,6 @@ Important:
 | Small workspace-only change | Narrow workspace `typecheck`, `build`, and `test` first |
 | Cross-workspace behavior change | `npm run typecheck` then `npm test` |
 | Docker/runtime change | `npm run docker:config` and, if needed, runtime probes |
-| Kubernetes manifest or deployment-doc change | `npm run k8s:render` and `npm run k8s:validate` |
 
 For Docker runtime probes:
 
@@ -66,21 +63,6 @@ curl http://localhost:4173/health
 curl http://localhost:4173/runtime-config.json
 npm run docker:down
 ```
-
-For Kubernetes manifest checks:
-
-```bash
-npm run k8s:render
-npm run k8s:validate
-```
-
-If your local `kubectl apply --dry-run=client -k deploy/k8s` stalls instead of returning, fall back to:
-
-```bash
-npm run k8s:render
-```
-
-Then inspect the rendered output before applying manifests for real.
 
 ## What success means
 

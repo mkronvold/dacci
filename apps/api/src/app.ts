@@ -7,6 +7,7 @@ import {
 } from "@dacci/content-engine";
 import {
   GitHubSync,
+  GitHubSyncError,
   GitHubSyncScheduler,
   type GitHubSyncOptions,
   isGitHubSyncError,
@@ -21,19 +22,26 @@ import type {
   DeleteTopicRequest,
   ExportDocumentsRequest,
   ExportDocumentsResponse,
+  GitSyncOperationResponse,
   GitSyncPushRequest,
   GitSyncScheduleConfigureRequest,
   GitSyncScheduleResponse,
+  GitSyncStatus,
   HealthCheckResponse,
   ImportDocumentsRequest,
+  LibraryRepoTestRequest,
+  LibraryRepoTestResponse,
   MoveDocumentRequest,
   RenameDocumentRequest,
   RenameSubtopicRequest,
   RenameTopicRequest,
   UpdateDocumentRequest,
 } from "@dacci/shared-types";
+import { repoSelectionHeaderName } from "@dacci/shared-types";
 import cors from "@fastify/cors";
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest } from "fastify";
+
+import { RepoContextResolver, type ResolvedRepoContext } from "./repoContext.js";
 
 export interface BuildAppOptions {
   dataRoot: string;
@@ -42,6 +50,7 @@ export interface BuildAppOptions {
   gitSyncRemoteUrl?: string;
   gitSshCommand?: string;
   gitSyncReleaseBranch?: string;
+  libraryRepoRoots?: string[];
 }
 
 const apiServiceSlug = "dacci-api";
@@ -51,11 +60,9 @@ export async function buildApp(options: BuildAppOptions) {
   const app = Fastify({
     logger: true,
   });
-  const engine = new ContentEngine({
-    dataRoot: options.dataRoot,
-  });
-  const gitSync = createGitSync(options);
-  const gitSyncScheduler = new GitHubSyncScheduler(gitSync, {
+  const repoContextResolver = createRepoContextResolver(options);
+  const defaultGitSync = createGitSync(options);
+  const gitSyncScheduler = new GitHubSyncScheduler(defaultGitSync, {
     logger: {
       info: (message) => app.log.info({ subsystem: "background-sync" }, message),
       warn: (message) => app.log.warn({ subsystem: "background-sync" }, message),
@@ -65,6 +72,7 @@ export async function buildApp(options: BuildAppOptions) {
 
   await app.register(cors, {
     origin: true,
+    credentials: true,
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
@@ -107,18 +115,24 @@ export async function buildApp(options: BuildAppOptions) {
     dataRoot: options.dataRoot,
   }));
 
-  app.get("/ready", async (): Promise<HealthCheckResponse> => {
-    await validateReadyRuntime(engine, gitSync, options.gitSshCommand);
+  app.get("/ready", async (request): Promise<HealthCheckResponse> => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    await validateReadyRuntime(
+      repoContext.createEngine(),
+      repoContext.createGitSync(),
+      options.gitSshCommand,
+    );
     return {
       status: "ok",
       service: apiServiceSlug,
-      dataRoot: options.dataRoot,
+      dataRoot: repoContext.dataRoot,
     };
   });
 
   app.get("/api", async (): Promise<ApiInfoResponse> => ({
     phase: "dacci-public-seed",
     service: apiServiceName,
+    configuredRepo: repoContextResolver.getDefaultSummary(),
     endpoints: [
       "/health",
       "/ready",
@@ -127,6 +141,7 @@ export async function buildApp(options: BuildAppOptions) {
       "/api/search",
       "/api/summary",
       "/api/documents",
+      "/api/library/test",
       "/api/import/documents",
       "/api/export",
       "/api/topics",
@@ -140,14 +155,14 @@ export async function buildApp(options: BuildAppOptions) {
     ],
   }));
 
-  app.get("/api/tree", async () => engine.getTree());
+  app.get("/api/tree", async (request) => resolveRepoContext(repoContextResolver, request).createEngine().getTree());
 
   app.get<{ Querystring: { query?: string } }>("/api/search", async (request) => {
     if (!request.query.query) {
       throw new ContentEngineError("invalid_input", "The 'query' query parameter is required.");
     }
 
-    return engine.searchDocuments(request.query.query);
+    return resolveRepoContext(repoContextResolver, request).createEngine().searchDocuments(request.query.query);
   });
 
   app.get<{ Querystring: { path?: string } }>("/api/documents", async (request) => {
@@ -155,108 +170,174 @@ export async function buildApp(options: BuildAppOptions) {
       throw new ContentEngineError("invalid_input", "The 'path' query parameter is required.");
     }
 
-    return engine.getDocument(request.query.path);
+    return resolveRepoContext(repoContextResolver, request).createEngine().getDocument(request.query.path);
   });
 
-  app.get("/api/summary", async () => engine.getSummary());
+  app.get("/api/summary", async (request) => resolveRepoContext(repoContextResolver, request).createEngine().getSummary());
 
-  app.get<{ Querystring: { refresh?: string } }>("/api/sync/status", async (request) =>
-    gitSyncScheduler.getStatus({
-      refreshRemote: request.query.refresh === "true",
-    }),
-  );
+  app.get<{ Querystring: { refresh?: string } }>("/api/sync/status", async (request) => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    const refreshRemote = request.query.refresh === "true";
+    if (repoContext.isDefault && gitSyncScheduler) {
+      return decorateGitSyncStatus(
+        await gitSyncScheduler.getStatus({
+          refreshRemote,
+        }),
+        repoContext,
+        gitSyncScheduler !== null,
+      );
+    }
 
-  app.post("/api/sync/pull", async () => gitSyncScheduler.pullContent());
+    const gitSync = repoContext.createGitSync();
+    return decorateGitSyncStatus(
+      await gitSync.getStatus({ refreshRemote }),
+      repoContext,
+      gitSyncScheduler !== null && repoContext.isDefault,
+      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
+    );
+  });
 
-  app.post<{ Body: GitSyncPushRequest }>("/api/sync/push", async (request) =>
-    gitSyncScheduler.pushContent(request.body),
-  );
+  app.post("/api/sync/pull", async (request): Promise<GitSyncOperationResponse> => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    if (repoContext.isDefault && gitSyncScheduler) {
+      return decorateGitSyncOperationResponse(await gitSyncScheduler.pullContent(), repoContext, true);
+    }
+
+    return decorateGitSyncOperationResponse(
+      await repoContext.createGitSync().pullContent(),
+      repoContext,
+      false,
+      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
+    );
+  });
+
+  app.post<{ Body: GitSyncPushRequest }>("/api/sync/push", async (request): Promise<GitSyncOperationResponse> => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    if (repoContext.isDefault && gitSyncScheduler) {
+      return decorateGitSyncOperationResponse(await gitSyncScheduler.pushContent(request.body), repoContext, true);
+    }
+
+    return decorateGitSyncOperationResponse(
+      await repoContext.createGitSync().pushContent(request.body),
+      repoContext,
+      false,
+      buildSchedulerUnsupportedReason(repoContext, gitSyncScheduler !== null),
+    );
+  });
 
   app.post<{ Body: GitSyncScheduleConfigureRequest }>(
     "/api/sync/schedule",
-    async (request): Promise<GitSyncScheduleResponse> =>
-      gitSyncScheduler.configureSchedule(request.body ?? {}),
+    async (request): Promise<GitSyncScheduleResponse> => {
+      const repoContext = resolveRepoContext(repoContextResolver, request);
+      ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+      return decorateGitSyncScheduleResponse(
+        await gitSyncScheduler.configureSchedule(request.body ?? {}),
+        repoContext,
+      );
+    },
   );
 
-  app.post("/api/sync/schedule/pause", async (): Promise<GitSyncScheduleResponse> =>
-    gitSyncScheduler.pauseSchedule(),
-  );
+  app.post("/api/sync/schedule/pause", async (request): Promise<GitSyncScheduleResponse> => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+    return decorateGitSyncScheduleResponse(await gitSyncScheduler.pauseSchedule(), repoContext);
+  });
 
-  app.post("/api/sync/schedule/resume", async (): Promise<GitSyncScheduleResponse> =>
-    gitSyncScheduler.resumeSchedule(),
-  );
+  app.post("/api/sync/schedule/resume", async (request): Promise<GitSyncScheduleResponse> => {
+    const repoContext = resolveRepoContext(repoContextResolver, request);
+    ensureSchedulerAvailable(repoContext, gitSyncScheduler);
+    return decorateGitSyncScheduleResponse(await gitSyncScheduler.resumeSchedule(), repoContext);
+  });
+
+  app.post<{ Body: LibraryRepoTestRequest }>("/api/library/test", async (request): Promise<LibraryRepoTestResponse> => {
+    const repoContext = repoContextResolver.resolveLibraryRepo(request.body.repo);
+    const gitSync = repoContext.createGitSync();
+    const [content, git] = await Promise.all([repoContext.createEngine().getSummary(), gitSync.validateConfiguration()]);
+    await gitSync.getStatus({ refreshRemote: true });
+
+    return {
+      repo: repoContext.summary,
+      content,
+      git,
+    };
+  });
 
   app.post<{ Body: CreateTopicRequest }>("/api/topics", async (request, reply) => {
-    const topic = await engine.createTopic(request.body.name);
+    const topic = await resolveRepoContext(repoContextResolver, request).createEngine().createTopic(request.body.name);
     return reply.status(201).send(topic);
   });
 
   app.patch<{ Params: { topicName: string }; Body: RenameTopicRequest }>(
     "/api/topics/:topicName",
-    async (request) => engine.renameTopic(request.params.topicName, request.body.nextName),
+    async (request) =>
+      resolveRepoContext(repoContextResolver, request)
+        .createEngine()
+        .renameTopic(request.params.topicName, request.body.nextName),
   );
 
   app.delete<{ Body: DeleteTopicRequest }>("/api/topics", async (request, reply) => {
-    await engine.deleteTopic(request.body.name);
+    await resolveRepoContext(repoContextResolver, request).createEngine().deleteTopic(request.body.name);
     return reply.status(204).send();
   });
 
   app.post<{ Body: CreateSubtopicRequest }>("/api/subtopics", async (request, reply) => {
-    const subtopic = await engine.createSubtopic(request.body.topicName, request.body.name);
+    const subtopic = await resolveRepoContext(repoContextResolver, request)
+      .createEngine()
+      .createSubtopic(request.body.topicName, request.body.name);
     return reply.status(201).send(subtopic);
   });
 
   app.patch<{ Body: RenameSubtopicRequest }>("/api/subtopics", async (request) =>
-    engine.renameSubtopic(
-      request.body.topicName,
-      request.body.currentName,
-      request.body.nextName,
-    ),
+    resolveRepoContext(repoContextResolver, request)
+      .createEngine()
+      .renameSubtopic(request.body.topicName, request.body.currentName, request.body.nextName),
   );
 
   app.delete<{ Body: DeleteSubtopicRequest }>("/api/subtopics", async (request, reply) => {
-    await engine.deleteSubtopic(request.body.topicName, request.body.name);
+    await resolveRepoContext(repoContextResolver, request).createEngine().deleteSubtopic(request.body.topicName, request.body.name);
     return reply.status(204).send();
   });
 
   app.post<{ Body: CreateDocumentRequest }>("/api/documents", async (request, reply) => {
-    const document = await engine.createDocument(request.body);
+    const document = await resolveRepoContext(repoContextResolver, request).createEngine().createDocument(request.body);
     return reply.status(201).send(document);
   });
 
   app.post<{ Body: ImportDocumentsRequest }>("/api/import/documents", async (request, reply) => {
-    const result = await engine.importDocuments(request.body);
+    const result = await resolveRepoContext(repoContextResolver, request).createEngine().importDocuments(request.body);
     return reply.status(201).send(result);
   });
 
   app.post<{ Body: ExportDocumentsRequest }>("/api/export", async (request): Promise<ExportDocumentsResponse> =>
-    engine.exportTransfer(request.body),
+    resolveRepoContext(repoContextResolver, request).createEngine().exportTransfer(request.body),
   );
 
   app.put<{ Body: UpdateDocumentRequest }>("/api/documents", async (request) =>
-    engine.updateDocument(request.body.path, request.body.body),
+    resolveRepoContext(repoContextResolver, request).createEngine().updateDocument(request.body.path, request.body.body),
   );
 
   app.patch<{ Body: RenameDocumentRequest }>("/api/documents/rename", async (request) =>
-    engine.renameDocument(request.body.path, request.body.nextName),
+    resolveRepoContext(repoContextResolver, request).createEngine().renameDocument(request.body.path, request.body.nextName),
   );
 
   app.patch<{ Body: MoveDocumentRequest }>("/api/documents/move", async (request) =>
-    engine.moveDocument(
-      request.body.path,
-      request.body.subtopicName
-        ? {
-            topicName: request.body.topicName,
-            subtopicName: request.body.subtopicName,
-          }
-        : {
-            topicName: request.body.topicName,
-          },
-    ),
+    resolveRepoContext(repoContextResolver, request)
+      .createEngine()
+      .moveDocument(
+        request.body.path,
+        request.body.subtopicName
+          ? {
+              topicName: request.body.topicName,
+              subtopicName: request.body.subtopicName,
+            }
+          : {
+              topicName: request.body.topicName,
+            },
+      ),
   );
 
   app.delete<{ Body: DeleteDocumentRequest }>("/api/documents", async (request, reply) => {
-    await engine.deleteDocument(request.body.path);
+    await resolveRepoContext(repoContextResolver, request).createEngine().deleteDocument(request.body.path);
     return reply.status(204).send();
   });
 
@@ -264,9 +345,34 @@ export async function buildApp(options: BuildAppOptions) {
 }
 
 export async function validateAppRuntimeConfiguration(options: BuildAppOptions): Promise<void> {
+  const repoContextResolver = createRepoContextResolver(options);
   const gitSync = createGitSync(options);
-  await gitSync.validateConfiguration();
+  await Promise.all([
+    gitSync.validateConfiguration(),
+    repoContextResolver.validateConfiguredLibraryRoots(),
+  ]);
   await ensureGitSshCommandFilesPresent(options.gitSshCommand);
+}
+
+function createRepoContextResolver(options: BuildAppOptions): RepoContextResolver {
+  const repoContextOptions: ConstructorParameters<typeof RepoContextResolver>[0] = {
+    defaultDataRoot: options.dataRoot,
+    defaultRepoRoot: options.gitSyncRepoRoot,
+  };
+  if (options.gitSyncRemoteName) {
+    repoContextOptions.gitSyncRemoteName = options.gitSyncRemoteName;
+  }
+  if (options.gitSyncRemoteUrl) {
+    repoContextOptions.gitSyncRemoteUrl = options.gitSyncRemoteUrl;
+  }
+  if (options.gitSyncReleaseBranch) {
+    repoContextOptions.gitSyncReleaseBranch = options.gitSyncReleaseBranch;
+  }
+  if (options.libraryRepoRoots) {
+    repoContextOptions.libraryRepoRoots = options.libraryRepoRoots;
+  }
+
+  return new RepoContextResolver(repoContextOptions);
 }
 
 function createGitSync(options: BuildAppOptions): GitHubSync {
@@ -285,6 +391,91 @@ function createGitSync(options: BuildAppOptions): GitHubSync {
   }
 
   return new GitHubSync(gitSyncOptions);
+}
+
+function resolveRepoContext(
+  repoContextResolver: RepoContextResolver,
+  request: FastifyRequest,
+): ResolvedRepoContext {
+  return repoContextResolver.resolveRequestSelection(request.headers[repoSelectionHeaderName]);
+}
+
+function ensureSchedulerAvailable(
+  repoContext: ResolvedRepoContext,
+  gitSyncScheduler: GitHubSyncScheduler | null,
+): asserts gitSyncScheduler is GitHubSyncScheduler {
+  if (!repoContext.isDefault) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      "Background sync scheduling is only available for the configured repository.",
+    );
+  }
+
+  if (!gitSyncScheduler) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      buildSchedulerUnsupportedReason(repoContext, false),
+    );
+  }
+}
+
+function buildSchedulerUnsupportedReason(
+  repoContext: ResolvedRepoContext,
+  schedulerAvailable: boolean,
+): string {
+  if (schedulerAvailable) {
+    return "Background sync scheduling is only available for the configured repository.";
+  }
+
+  return repoContext.isDefault
+    ? "Background sync scheduling is unavailable in this runtime."
+    : "Background sync scheduling is only available for the configured repository.";
+}
+
+function decorateGitSyncOperationResponse(
+  response: GitSyncOperationResponse,
+  repoContext: ResolvedRepoContext,
+  schedulerSupported: boolean,
+  schedulerUnsupportedReason?: string,
+): GitSyncOperationResponse {
+  return {
+    ...response,
+    status: decorateGitSyncStatus(
+      response.status,
+      repoContext,
+      schedulerSupported,
+      schedulerUnsupportedReason,
+    ),
+  };
+}
+
+function decorateGitSyncScheduleResponse(
+  response: GitSyncScheduleResponse,
+  repoContext: ResolvedRepoContext,
+): GitSyncScheduleResponse {
+  return {
+    ...response,
+    status: decorateGitSyncStatus(response.status, repoContext, true),
+  };
+}
+
+function decorateGitSyncStatus(
+  status: GitSyncStatus,
+  repoContext: ResolvedRepoContext,
+  schedulerSupported: boolean,
+  schedulerUnsupportedReason?: string,
+): GitSyncStatus {
+  const decoratedStatus: GitSyncStatus = {
+    ...status,
+    repo: repoContext.summary,
+    schedulerSupported,
+  };
+  if (!schedulerSupported) {
+    decoratedStatus.schedulerUnsupportedReason =
+      schedulerUnsupportedReason ?? "Background sync scheduling is only available for the configured repository.";
+  }
+
+  return decoratedStatus;
 }
 
 async function validateReadyRuntime(

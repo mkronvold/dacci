@@ -11,7 +11,7 @@ Dacci is the application for the external `E2Open.KPE.Content` Markdown content 
 | Web UI | Provides a viewer-first browser workspace for reading and managing documents |
 | CLI | Supports scripted content, transfer, and sync workflows |
 | Git sync | Adds guarded pull, push, and optional background pull scheduling |
-| Deployment assets | Packages the runtime for Docker and baseline Kubernetes deployment |
+| Deployment assets | Packages the local Docker runtime and keeps archived Kubernetes manifests for reference |
 
 ## Quick start
 
@@ -64,7 +64,6 @@ npm test
 | Show sync status | `npm run cli -- sync status` |
 | Show sync status against an explicitly configured content checkout | `DATA_ROOT=../E2Open.KPE.Content/data GIT_SYNC_REPO_ROOT=../E2Open.KPE.Content npm run cli -- sync status` |
 | Enable background pull scheduling | `npm run cli -- sync schedule configure --enable --interval-minutes 15` |
-| Render Kubernetes manifests | `npm run k8s:render` |
 | Validate Docker Compose config | `npm run docker:config` |
 
 ## Content model
@@ -93,7 +92,7 @@ Storage notes:
 | Import | Markdown files, directories, JSON bundles, and ZIP archives |
 | Export | Markdown for single documents, JSON bundles, and ZIP archives |
 | Sync | Guarded Git status, pull, push, and optional background pull scheduling |
-| Packaging | Multi-stage Docker images and baseline Kubernetes manifests |
+| Packaging | Multi-stage Docker images and archived Kubernetes manifests |
 
 ## API surface
 
@@ -116,7 +115,19 @@ See `apps/api/src/app.ts` for the exact route definitions and `docs/OPERATORS.md
 | --- | --- |
 | Native local development | `npm run dev` |
 | Packaged local runtime | `deploy/docker/compose.yaml` and `docs/DOCKER.md` |
-| Baseline Kubernetes deployment | `deploy/k8s/` and `docs/KUBERNETES.md` |
+| Archived Kubernetes reference | `deploy/k8s/` and `docs/KUBERNETES.md` (frozen reference only; not part of the active validation path) |
+
+## Git access model
+
+The active packaged-runtime target is a localhost-only Docker stack that uses normal SSH Git access:
+
+- `./scripts/up` binds the API and web ports to localhost only
+- the API container mounts the host SSH directory read-only at `/root/.ssh`
+- if `SSH_AUTH_SOCK` is set when you start the stack, Dacci forwards that agent socket into the API container too
+- the browser does not connect GitHub, upload SSH keys, or store per-repo GitHub usernames
+- pull, push, and refresh use the same SSH remotes and host SSH setup that already work on your machine
+
+Before using the packaged runtime, make sure the host content checkout can already talk to its remote with normal SSH Git commands. See `docs/DOCKER.md` and `docs/OPERATORS.md` for the runtime details.
 
 ## Documentation map
 
@@ -125,7 +136,7 @@ See `apps/api/src/app.ts` for the exact route definitions and `docs/OPERATORS.md
 | `docs/DESIGN.md` | Why the UI is shaped the way it is |
 | `docs/ARCHITECTURE.md` | Why the runtime is split into its current layers and deployment model |
 | `docs/DOCKER.md` | What to do to run the packaged Docker runtime |
-| `docs/KUBERNETES.md` | What to do to deploy the baseline Kubernetes package |
+| `docs/KUBERNETES.md` | Archived Kubernetes package reference retained for historical context during the local-Docker rescope |
 | `docs/OPERATORS.md` | What operators need to know about sync, runtime assumptions, and deployment behavior |
 | `TESTING.md` | What to run to validate changes |
 | `DEMO.md` | What to do for an end-to-end product walkthrough |

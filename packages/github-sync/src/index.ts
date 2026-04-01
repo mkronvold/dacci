@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-
 import type {
   GitSyncChange,
   GitSyncCommitSummary,
@@ -15,6 +16,16 @@ import type {
 } from "@dacci/shared-types";
 
 const execFileAsync = promisify(execFile);
+const pullCleanWorkingTreeMessage = "Dacci sync pull requires a clean working tree. Push local changes before pulling.";
+const syncCommittedContentOnlyMessage =
+  "Dacci sync only supports content. Move non-content commits off this branch or publish them separately before syncing.";
+const pullCommittedContentOnlyMessage =
+  "Dacci sync pull only supports content. Move non-content commits off this branch or publish them separately before pulling.";
+const pullLocalChangesAction = "Push local changes before pulling.";
+const pullRemoteContentAction = "Pull remote content before pushing local content.";
+const localNonContentPushAction =
+  "Dacci sync push leaves non-content commits local. Publish them separately if you want them on the remote branch.";
+const preparePullFromLocalNonContentAction = "Publish non-content commits separately before pulling remote content.";
 
 export type GitHubSyncErrorCode = "command_failed" | "conflict" | "invalid_configuration";
 
@@ -54,6 +65,7 @@ type RepositoryContext = {
   currentBranch: string;
   remoteName: string;
   configuredRemoteUrl?: string;
+  configuredLocalRemotePaths?: string[];
   upstreamBranch?: string;
 };
 
@@ -123,16 +135,16 @@ export class GitHubSync {
       (change) => !this.isPathInsideContent(context.contentPath, change.path),
     );
     const pullBlockers = this.buildPullBlockers(context, hasRepoChanges, nonContentCommittedFiles);
-    const pushBlockers = this.buildPushBlockers(aheadBehind.behind, nonContentChangedFiles, nonContentCommittedFiles);
+    const pushBlockers = this.buildPushBlockers(aheadBehind.behind, nonContentCommittedFiles);
     const recommendedActions = this.buildRecommendedActions(
       context,
       aheadBehind,
       hasRepoChanges,
-      nonContentChangedFiles,
       nonContentCommittedFiles,
       pullBlockers,
       pushBlockers,
     );
+    const resolvedRemoteUrl = this.resolveEffectiveRemoteUrl(context) ?? context.configuredRemoteUrl;
 
     const status: GitSyncStatus = {
       repoRoot: context.repoRoot,
@@ -153,6 +165,10 @@ export class GitHubSync {
       pushBlockers,
       recommendedActions,
     };
+
+    if (resolvedRemoteUrl) {
+      status.remoteUrl = resolvedRemoteUrl;
+    }
 
     if (context.upstreamBranch) {
       status.upstreamBranch = context.upstreamBranch;
@@ -207,16 +223,17 @@ export class GitHubSync {
     }
 
     const context = await this.getRepositoryContext();
-    await this.ensureNoWorkingTreeChangesOutsideContent(context);
     await this.fetchRemote(context);
-    await this.ensureNoCommittedChangesOutsideContent(context);
-
     const beforeStatus = await this.getStatusInternal();
     if (beforeStatus.behind > 0) {
       throw new GitHubSyncError(
         "conflict",
         "Remote content is ahead of the local branch. Pull remote changes before pushing local content.",
       );
+    }
+
+    if (beforeStatus.nonContentCommittedFiles.length > 0) {
+      return this.pushContentWhileKeepingLocalNonContent(context, commitMessage);
     }
 
     let commitSha: string | undefined;
@@ -252,6 +269,214 @@ export class GitHubSync {
     }
 
     return response;
+  }
+
+  private async pushContentWhileKeepingLocalNonContent(
+    context: RepositoryContext,
+    commitMessage: string,
+  ): Promise<GitSyncOperationResponse> {
+    if (!context.upstreamBranch) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        "Selective content push requires an upstream branch configured for the current branch.",
+      );
+    }
+
+    const originalHead = await this.readFirstLine(["rev-parse", "HEAD"], context.repoRoot);
+    const localCommitShas = await this.readLocalAheadCommitShas(context);
+    const stagedNonContentPatch = await this.readStdout(
+      ["diff", "--binary", "--cached", "HEAD", ...this.buildNonContentPathspec(context.contentPath)],
+      context.repoRoot,
+    );
+    const unstagedNonContentPatch = await this.readStdout(
+      ["diff", "--binary", ...this.buildNonContentPathspec(context.contentPath)],
+      context.repoRoot,
+    );
+    const backupRef = `refs/dacci-sync-backup/${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    await this.runGit(["update-ref", backupRef, originalHead], {
+      cwd: context.repoRoot,
+    });
+
+    let removeBackupRef = false;
+    try {
+      const contentCommitSha = await this.createContentOnlyPushCommit(context, commitMessage);
+      if (!contentCommitSha) {
+        const status = await this.getStatusInternal({ refreshRemote: false });
+        removeBackupRef = true;
+        return {
+          action: "push",
+          summary: "No content changes were available to push. Non-content changes were left local.",
+          status,
+        };
+      }
+
+      await this.runGitWithRemoteRewrite(
+        ["push", context.remoteName, `${contentCommitSha}:refs/heads/${context.currentBranch}`],
+        context,
+        {
+          cwd: context.repoRoot,
+          conflictMessage: "Pushing local content failed. Fetch and resolve remote branch issues before retrying sync.",
+        },
+      );
+      await this.fetchRemote(context);
+      await this.runGit(["reset", "--hard", contentCommitSha], {
+        cwd: context.repoRoot,
+        conflictMessage: "Resetting the local branch after a content-only push failed.",
+      });
+      await this.replayLocalNonContentCommits(context, localCommitShas);
+      await this.applyPatchIfPresent(context.repoRoot, stagedNonContentPatch, {
+        applyToIndex: true,
+        conflictMessage: "Restoring staged non-content changes after a content-only push failed.",
+      });
+      await this.applyPatchIfPresent(context.repoRoot, unstagedNonContentPatch, {
+        applyToIndex: false,
+        conflictMessage: "Restoring non-content working tree changes after a content-only push failed.",
+      });
+
+      const status = await this.getStatusInternal({ refreshRemote: false });
+      removeBackupRef = true;
+      const response: GitSyncOperationResponse = {
+        action: "push",
+        summary: `Pushed content changes to ${context.remoteName}/${context.currentBranch} while leaving non-content changes local.`,
+        status,
+        commitSha: contentCommitSha,
+      };
+      return response;
+    } finally {
+      if (removeBackupRef) {
+        try {
+          await this.runGit(["update-ref", "-d", backupRef], {
+            cwd: context.repoRoot,
+          });
+        } catch {
+          // Best effort cleanup for a temporary recovery ref.
+        }
+      }
+    }
+  }
+
+  private async createContentOnlyPushCommit(
+    context: RepositoryContext,
+    commitMessage: string,
+  ): Promise<string | null> {
+    if (!context.upstreamBranch) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        "Selective content push requires an upstream branch configured for the current branch.",
+      );
+    }
+
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "dacci-sync-push-"));
+    const tempWorktree = path.join(tempRoot, "repo");
+
+    try {
+      await this.runGit(["worktree", "add", "--detach", tempWorktree, context.upstreamBranch], {
+        cwd: context.repoRoot,
+      });
+      await this.replaceDirectorySnapshot(context.contentRoot, path.join(tempWorktree, context.contentPath));
+
+      const contentStatus = await this.readStdout(
+        ["status", "--porcelain", "--untracked-files=all", "--", context.contentPath],
+        tempWorktree,
+      );
+      if (!contentStatus.trim()) {
+        return null;
+      }
+
+      await this.runGit(["add", "-A", "--", context.contentPath], {
+        cwd: tempWorktree,
+      });
+      await this.runGit(["commit", "-m", commitMessage, "--only", "--", context.contentPath], {
+        cwd: tempWorktree,
+        conflictMessage: "Creating a content-only sync commit failed.",
+      });
+      return await this.readFirstLine(["rev-parse", "HEAD"], tempWorktree);
+    } finally {
+      try {
+        await this.runGit(["worktree", "remove", "--force", tempWorktree], {
+          cwd: context.repoRoot,
+        });
+      } catch {
+        // Best effort cleanup for a temporary worktree.
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+
+  private async replayLocalNonContentCommits(
+    context: RepositoryContext,
+    localCommitShas: string[],
+  ): Promise<void> {
+    for (const commitSha of localCommitShas) {
+      const patch = await this.readStdout(
+        ["show", "--binary", "--format=", commitSha, ...this.buildNonContentPathspec(context.contentPath)],
+        context.repoRoot,
+      );
+      if (!patch.trim()) {
+        continue;
+      }
+
+      await this.applyPatchIfPresent(context.repoRoot, patch, {
+        applyToIndex: true,
+        conflictMessage: "Replaying local non-content commits after a content-only push failed.",
+      });
+      await this.runGit(["commit", "--reuse-message", commitSha], {
+        cwd: context.repoRoot,
+        conflictMessage: "Recreating a local non-content commit after a content-only push failed.",
+      });
+    }
+  }
+
+  private async readLocalAheadCommitShas(context: RepositoryContext): Promise<string[]> {
+    if (!context.upstreamBranch) {
+      return [];
+    }
+
+    const output = await this.readStdout(["rev-list", "--reverse", `${context.upstreamBranch}..HEAD`], context.repoRoot);
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  private buildNonContentPathspec(contentPath: string): string[] {
+    return ["--", ".", `:(exclude)${contentPath}`];
+  }
+
+  private async applyPatchIfPresent(
+    cwd: string,
+    patch: string,
+    options: {
+      applyToIndex: boolean;
+      conflictMessage: string;
+    },
+  ): Promise<void> {
+    if (!patch.trim()) {
+      return;
+    }
+
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "dacci-sync-patch-"));
+    const patchPath = path.join(tempRoot, "changes.patch");
+    try {
+      await writeFile(patchPath, patch.endsWith("\n") ? patch : `${patch}\n`, "utf8");
+      const args = ["apply"];
+      if (options.applyToIndex) {
+        args.push("--index");
+      }
+      args.push("--whitespace=nowarn", patchPath);
+      await this.runGit(args, {
+        cwd,
+        conflictMessage: options.conflictMessage,
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+
+  private async replaceDirectorySnapshot(sourcePath: string, targetPath: string): Promise<void> {
+    await rm(targetPath, { recursive: true, force: true });
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    await cp(sourcePath, targetPath, { recursive: true });
   }
 
   private async getRepositoryContext(): Promise<RepositoryContext> {
@@ -296,6 +521,10 @@ export class GitHubSync {
     };
     if (configuredRemoteUrl) {
       repositoryContext.configuredRemoteUrl = configuredRemoteUrl;
+      const configuredLocalRemotePaths = resolveLocalRemoteSafeDirectories(configuredRemoteUrl, repoRoot);
+      if (configuredLocalRemotePaths.length > 0) {
+        repositoryContext.configuredLocalRemotePaths = configuredLocalRemotePaths;
+      }
     }
 
     if (upstreamBranch) {
@@ -440,28 +669,7 @@ export class GitHubSync {
   private async ensureCleanWorkingTree(context: RepositoryContext): Promise<void> {
     const output = await this.readStdout(["status", "--porcelain", "--untracked-files=all"], context.repoRoot);
     if (output.trim().length > 0) {
-      throw new GitHubSyncError(
-        "conflict",
-        "GitHub sync pull requires a clean working tree. Commit, stash, or discard local changes before pulling.",
-      );
-    }
-  }
-
-  private async ensureNoWorkingTreeChangesOutsideContent(context: RepositoryContext): Promise<void> {
-    const output = await this.readStdout(["status", "--porcelain", "--untracked-files=all"], context.repoRoot);
-    const outsideChanges = output
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean)
-      .map((line) => this.parseStatusLine(line))
-      .filter((change) => !this.isPathInsideContent(context.contentPath, change.path))
-      .filter((change) => !(change.indexStatus === "?" && change.worktreeStatus === "?"));
-
-    if (outsideChanges.length > 0) {
-      throw new GitHubSyncError(
-        "conflict",
-        "GitHub sync push only supports content-only working tree changes. Commit or clear non-content changes first.",
-      );
+      throw new GitHubSyncError("conflict", pullCleanWorkingTreeMessage);
     }
   }
 
@@ -469,10 +677,7 @@ export class GitHubSync {
     const outsideChanges = await this.getNonContentCommittedFiles(context);
 
     if (outsideChanges.length > 0) {
-      throw new GitHubSyncError(
-        "conflict",
-        "GitHub sync only supports branches whose unpushed commits are limited to the configured content directory.",
-      );
+      throw new GitHubSyncError("conflict", syncCommittedContentOnlyMessage);
     }
   }
 
@@ -488,15 +693,11 @@ export class GitHubSync {
     }
 
     if (hasRepoChanges) {
-      blockers.push(
-        "GitHub sync pull requires a clean working tree. Commit, stash, or discard local changes before pulling.",
-      );
+      blockers.push(pullCleanWorkingTreeMessage);
     }
 
     if (nonContentCommittedFiles.length > 0) {
-      blockers.push(
-        "GitHub sync only supports pull on branches whose committed changes are limited to the configured content directory.",
-      );
+      blockers.push(pullCommittedContentOnlyMessage);
     }
 
     return blockers;
@@ -504,25 +705,12 @@ export class GitHubSync {
 
   private buildPushBlockers(
     behind: number,
-    nonContentChangedFiles: GitSyncChange[],
     nonContentCommittedFiles: string[],
   ): string[] {
     const blockers: string[] = [];
 
     if (behind > 0) {
       blockers.push("Remote content is ahead of the local branch. Pull remote changes before pushing local content.");
-    }
-
-    if (nonContentChangedFiles.length > 0) {
-      blockers.push(
-        "GitHub sync push only supports content-only working tree changes. Commit or clear non-content changes first.",
-      );
-    }
-
-    if (nonContentCommittedFiles.length > 0) {
-      blockers.push(
-        "GitHub sync only supports push on branches whose unpushed commits are limited to the configured content directory.",
-      );
     }
 
     return blockers;
@@ -532,7 +720,6 @@ export class GitHubSync {
     context: RepositoryContext,
     aheadBehind: { ahead: number; behind: number },
     hasRepoChanges: boolean,
-    nonContentChangedFiles: GitSyncChange[],
     nonContentCommittedFiles: string[],
     pullBlockers: string[],
     pushBlockers: string[],
@@ -541,7 +728,7 @@ export class GitHubSync {
 
     if (context.currentBranch !== this.releaseBranch) {
       actions.push(
-        `Switch to '${this.releaseBranch}' before running release sync operations for the shared baseline.`,
+        `Switch to '${this.releaseBranch}' before running Dacci sync operations for the shared baseline.`,
       );
     }
 
@@ -551,16 +738,17 @@ export class GitHubSync {
       );
     }
 
-    if (aheadBehind.behind > 0) {
-      actions.push(`Pull ${context.remoteName}/${context.currentBranch} before pushing local content changes.`);
+    if (hasRepoChanges) {
+      actions.push(pullLocalChangesAction);
     }
 
-    if (nonContentChangedFiles.length > 0) {
-      actions.push("Commit, stash, or clear non-content working tree changes before using sync push.");
+    if (aheadBehind.behind > 0) {
+      actions.push(pullRemoteContentAction);
     }
 
     if (nonContentCommittedFiles.length > 0) {
-      actions.push("Move non-content commits off this branch or publish them separately before content sync.");
+      actions.push(localNonContentPushAction);
+      actions.push(preparePullFromLocalNonContentAction);
     }
 
     if (!hasRepoChanges && pullBlockers.length === 0 && pushBlockers.length === 0) {
@@ -587,13 +775,11 @@ export class GitHubSync {
   }
 
   private async commandExitsWithOne(args: string[], cwd: string): Promise<boolean> {
+    const { env, cleanup } = await this.prepareGitEnvironment(cwd);
     try {
-      await execFileAsync("git", args, {
+      await execFileAsync("git", this.withSafeDirectories(args, cwd), {
         cwd,
-        env: {
-          ...process.env,
-          GIT_TERMINAL_PROMPT: "0",
-        },
+        env,
         maxBuffer: 10 * 1024 * 1024,
       });
       return false;
@@ -604,6 +790,8 @@ export class GitHubSync {
       }
 
       throw this.buildCommandError(args, error);
+    } finally {
+      await cleanup();
     }
   }
 
@@ -643,20 +831,21 @@ export class GitHubSync {
     options: {
       cwd: string;
       conflictMessage?: string;
+      safeDirectories?: string[];
     },
   ): Promise<{ stdout: string; stderr: string }> {
+    const { env, cleanup } = await this.prepareGitEnvironment(options.cwd, options.safeDirectories);
     try {
-      return await execFileAsync("git", args, {
+      return await execFileAsync("git", this.withSafeDirectories(args, options.cwd, options.safeDirectories), {
         cwd: options.cwd,
-        env: {
-          ...process.env,
-          GIT_TERMINAL_PROMPT: "0",
-        },
+        env,
         maxBuffer: 10 * 1024 * 1024,
       });
     } catch (error) {
       const message = options.conflictMessage ?? undefined;
       throw this.buildCommandError(args, error, message);
+    } finally {
+      await cleanup();
     }
   }
 
@@ -669,33 +858,120 @@ export class GitHubSync {
     },
   ): Promise<{ stdout: string; stderr: string }> {
     const configuredRemoteUrl = context.configuredRemoteUrl?.trim();
-    if (!this.remoteUrl || !configuredRemoteUrl || configuredRemoteUrl === this.remoteUrl) {
-      return this.runGit(args, options);
+    const safeDirectories = [...(context.configuredLocalRemotePaths ?? [])];
+    const effectiveRemoteUrl = this.resolveEffectiveRemoteUrl(context);
+    const overrideLocalRemotePaths = effectiveRemoteUrl
+      ? resolveLocalRemoteSafeDirectories(effectiveRemoteUrl, context.repoRoot)
+      : [];
+    if (overrideLocalRemotePaths.length > 0) {
+      safeDirectories.push(...overrideLocalRemotePaths);
+    }
+    if (!effectiveRemoteUrl || !configuredRemoteUrl || configuredRemoteUrl === effectiveRemoteUrl) {
+      return this.runGit(args, {
+        ...options,
+        safeDirectories,
+      });
     }
 
+    const { env, cleanup } = await this.prepareGitEnvironment(options.cwd, safeDirectories);
     try {
       return await execFileAsync(
         "git",
-        [
+        this.withSafeDirectories(
+          [
           "-c",
-          `url.${this.remoteUrl}.insteadOf=${configuredRemoteUrl}`,
+          `url.${effectiveRemoteUrl}.insteadOf=${configuredRemoteUrl}`,
           "-c",
-          `url.${this.remoteUrl}.pushInsteadOf=${configuredRemoteUrl}`,
+          `url.${effectiveRemoteUrl}.pushInsteadOf=${configuredRemoteUrl}`,
           ...args,
-        ],
+          ],
+          options.cwd,
+          safeDirectories,
+        ),
         {
           cwd: options.cwd,
-          env: {
-            ...process.env,
-            GIT_TERMINAL_PROMPT: "0",
-          },
+          env,
           maxBuffer: 10 * 1024 * 1024,
         },
       );
     } catch (error) {
       const message = options.conflictMessage ?? undefined;
       throw this.buildCommandError(args, error, message);
+    } finally {
+      await cleanup();
     }
+  }
+
+  private withSafeDirectories(args: string[], cwd: string, extraSafeDirectories?: string[]): string[] {
+    const safeDirectories = [...new Set([path.resolve(cwd), ...(extraSafeDirectories ?? [])])];
+    return [...safeDirectories.flatMap((entry) => ["-c", `safe.directory=${entry}`]), ...args];
+  }
+
+  private async prepareGitEnvironment(
+    cwd: string,
+    extraSafeDirectories?: string[],
+  ): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> }> {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const safeDirectories = [...new Set([path.resolve(cwd), ...(extraSafeDirectories ?? [])])];
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "dacci-git-safe-"));
+    const configPath = path.join(tempDirectory, "gitconfig");
+    const existingGlobalConfigs = await this.readExistingGlobalGitConfigPaths(env);
+    const configLines: string[] = [];
+
+    for (const configEntry of existingGlobalConfigs) {
+      configLines.push("[include]");
+      configLines.push(`\tpath = ${quoteGitConfigValue(configEntry)}`);
+    }
+
+    configLines.push("[safe]");
+    for (const entry of safeDirectories) {
+      configLines.push(`\tdirectory = ${quoteGitConfigValue(entry)}`);
+    }
+
+    await writeFile(configPath, `${configLines.join("\n")}\n`, "utf8");
+    env.GIT_CONFIG_GLOBAL = configPath;
+    const cleanupTasks: Array<() => Promise<void>> = [
+      async () => {
+        await rm(tempDirectory, { recursive: true, force: true });
+      },
+    ];
+
+    return {
+      env,
+      cleanup: async () => {
+        for (const cleanupTask of cleanupTasks.reverse()) {
+          await cleanupTask();
+        }
+      },
+    };
+  }
+
+  private async readExistingGlobalGitConfigPaths(env: NodeJS.ProcessEnv): Promise<string[]> {
+    const homeDirectory = env.HOME?.trim();
+    const candidatePaths = new Set<string>();
+    if (env.GIT_CONFIG_GLOBAL?.trim()) {
+      candidatePaths.add(path.resolve(env.GIT_CONFIG_GLOBAL));
+    } else if (homeDirectory) {
+      candidatePaths.add(path.join(homeDirectory, ".gitconfig"));
+      candidatePaths.add(path.join(env.XDG_CONFIG_HOME?.trim() || path.join(homeDirectory, ".config"), "git", "config"));
+    }
+
+    const existingPaths: string[] = [];
+    for (const candidatePath of candidatePaths) {
+      try {
+        const stats = await stat(candidatePath);
+        if (stats.isFile()) {
+          existingPaths.push(candidatePath);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return existingPaths;
   }
 
   private buildCommandError(
@@ -759,6 +1035,39 @@ export class GitHubSync {
   private toGitPath(targetPath: string): string {
     return targetPath.split(path.sep).join(path.posix.sep);
   }
+
+  private resolveEffectiveRemoteUrl(_context: RepositoryContext): string | undefined {
+    return this.remoteUrl;
+  }
+}
+
+function resolveLocalRemoteSafeDirectories(remoteUrl: string, repoRoot: string): string[] {
+  const trimmedValue = remoteUrl.trim();
+  if (!trimmedValue) {
+    return [];
+  }
+
+  if (trimmedValue.startsWith("file://")) {
+    try {
+      return [path.resolve(fileURLToPath(trimmedValue))];
+    } catch {
+      return [];
+    }
+  }
+
+  if (/^[A-Za-z]:[\\/]/.test(trimmedValue) || trimmedValue.startsWith("\\\\") || trimmedValue.startsWith("/")) {
+    return [path.resolve(trimmedValue)];
+  }
+
+  if (/^[^@]+@[^:]+:.+/.test(trimmedValue) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmedValue)) {
+    return [];
+  }
+
+  return [trimmedValue, path.resolve(repoRoot, trimmedValue)];
+}
+
+function quoteGitConfigValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 export interface GitHubSyncSchedulerLogger {

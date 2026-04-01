@@ -13,6 +13,52 @@ interface InfoListBlockProps {
   tone?: "default" | "danger";
 }
 
+function isConfiguredRepositoryOnlySchedulerReason(reason?: string): boolean {
+  return (reason ?? "").toLowerCase().includes("configured repository");
+}
+
+function getBranchLabel(status: GitSyncStatus): string {
+  return status.currentBranch === status.releaseBranch
+    ? status.currentBranch
+    : `${status.currentBranch} (release: ${status.releaseBranch})`;
+}
+
+function getBackgroundSyncLabel(status: GitSyncStatus): string {
+  if (status.scheduler) {
+    if (!status.scheduler.enabled) {
+      return "Background sync off";
+    }
+
+    return status.scheduler.paused ? "Background sync paused" : `Background sync ${status.scheduler.intervalMinutes}m`;
+  }
+
+  if (status.schedulerSupported === false) {
+    return isConfiguredRepositoryOnlySchedulerReason(status.schedulerUnsupportedReason)
+      ? "Only for configured repository"
+      : "Background sync unavailable";
+  }
+
+  return "Background sync unavailable";
+}
+
+function getBackgroundSyncFieldValue(status: GitSyncStatus): string {
+  if (status.scheduler) {
+    if (!status.scheduler.enabled) {
+      return "Disabled";
+    }
+
+    return status.scheduler.paused ? "Paused" : `Enabled every ${status.scheduler.intervalMinutes} min`;
+  }
+
+  if (status.schedulerSupported === false) {
+    return isConfiguredRepositoryOnlySchedulerReason(status.schedulerUnsupportedReason)
+      ? "Only for configured repository"
+      : "Unavailable";
+  }
+
+  return "Unavailable";
+}
+
 function InfoListBlock(props: InfoListBlockProps) {
   if (props.items.length === 0) {
     return null;
@@ -39,26 +85,27 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
     );
   }
 
+  const nonContentChangesBlockPush = props.status.pushBlockers.includes(
+    "Dacci sync push only supports content. Commit or clear non-content changes first.",
+  );
+  const branchLabel = getBranchLabel(props.status);
+  const schedulerLabel = getBackgroundSyncLabel(props.status);
+
   if (props.variant === "compact") {
-    const schedulerLabel = props.status.scheduler
-      ? props.status.scheduler.enabled
-        ? props.status.scheduler.paused
-          ? "Background sync paused"
-          : `Background sync ${props.status.scheduler.intervalMinutes}m`
-        : "Background sync off"
-      : "Background sync unavailable";
+    const repoLabel = props.status.repo?.name ?? "Configured repository";
 
     return (
       <div className="sync-chip-row">
+        <span className="metadata-pill">Repository {repoLabel}</span>
         <span className={props.selectedDocumentChanged ? "metadata-pill warn" : "metadata-pill success"}>
           {props.selectedDocumentChanged ? "Selected doc changed" : "Selected doc clean"}
         </span>
         <span className="metadata-pill">Content changes {props.status.changedFiles.length}</span>
-        <span className={props.status.nonContentChangedFiles.length > 0 ? "metadata-pill warn" : "metadata-pill success"}>
+        <span className={nonContentChangesBlockPush ? "metadata-pill danger" : "metadata-pill success"}>
           Non-content changes {props.status.nonContentChangedFiles.length}
         </span>
         <span className={props.status.isReleaseBranch ? "metadata-pill success" : "metadata-pill warn"}>
-          Release branch {props.status.releaseBranch}
+          Branch {branchLabel}
         </span>
         <span
           className={
@@ -79,22 +126,28 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
     <div className="form-grid">
       <dl className="status-grid compact">
         <div>
-          <dt>Current branch</dt>
-          <dd>{props.status.currentBranch}</dd>
+          <dt>Repository name</dt>
+          <dd>{props.status.repo?.name ?? "Configured repository"}</dd>
         </div>
         <div>
-          <dt>Release branch</dt>
-          <dd>{props.status.releaseBranch}</dd>
+          <dt>Repository root</dt>
+          <dd>{props.status.repo?.repoRoot ?? props.status.repoRoot}</dd>
         </div>
         <div>
-          <dt>Upstream</dt>
-          <dd>{props.status.upstreamBranch ?? "Not configured"}</dd>
+          <dt>Content root</dt>
+          <dd>{props.status.repo?.dataRoot ?? props.status.contentRoot}</dd>
         </div>
         <div>
-          <dt>Ahead / behind</dt>
-          <dd>
-            {props.status.ahead} / {props.status.behind}
-          </dd>
+          <dt>Branch</dt>
+          <dd>{branchLabel}</dd>
+        </div>
+        <div>
+          <dt>Remote</dt>
+          <dd>{props.status.remoteName}</dd>
+        </div>
+        <div>
+          <dt>Remote URL</dt>
+          <dd>{props.status.remoteUrl ? <code>{props.status.remoteUrl}</code> : "Not configured"}</dd>
         </div>
         <div>
           <dt>Content changes</dt>
@@ -102,19 +155,11 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
         </div>
         <div>
           <dt>Non-content changes</dt>
-          <dd>{props.status.nonContentChangedFiles.length}</dd>
+          <dd className={nonContentChangesBlockPush ? "danger" : undefined}>{props.status.nonContentChangedFiles.length}</dd>
         </div>
         <div>
           <dt>Background sync</dt>
-          <dd>
-            {props.status.scheduler
-              ? props.status.scheduler.enabled
-                ? props.status.scheduler.paused
-                  ? "Paused"
-                  : `Enabled every ${props.status.scheduler.intervalMinutes} min`
-                : "Disabled"
-              : "Unavailable"}
-          </dd>
+          <dd>{getBackgroundSyncFieldValue(props.status)}</dd>
         </div>
         <div>
           <dt>Next scheduled run</dt>
@@ -156,7 +201,7 @@ export function SyncStatusSummary(props: SyncStatusSummaryProps) {
           (change) => `${change.indexStatus}${change.worktreeStatus} ${change.path}`,
         )}
         title="Non-content working tree changes"
-        tone="danger"
+        tone={nonContentChangesBlockPush ? "danger" : "default"}
       />
 
       <InfoListBlock

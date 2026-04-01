@@ -82,7 +82,11 @@ test("github sync reports content changes", async (t) => {
   assert.equal(status.changedFiles[0]?.path, "data/Guide.md");
   assert.equal(status.nonContentChangedFiles.length, 0);
   assert.equal(status.pushBlockers.length, 0);
-  assert.ok(status.pullBlockers.length > 0);
+  assert.deepEqual(status.pullBlockers, ["Dacci sync pull requires a clean working tree. Push local changes before pulling."]);
+  assert.ok(
+    status.recommendedActions.includes("Push local changes before pulling."),
+    "expected pull guidance in recommended actions",
+  );
 });
 
 test("github sync validates split-ready repo and content roots", async (t) => {
@@ -102,6 +106,32 @@ test("github sync validates split-ready repo and content roots", async (t) => {
   assert.equal(validation.contentRoot, fixture.dataRoot);
   assert.equal(validation.contentPath, "data");
   assert.equal(validation.currentBranch, "main");
+});
+
+test("github sync marks the configured repo as safe for Git ownership checks", async (t) => {
+  const fixture = await createGitFixture("dacci-github-sync-safe-directory-");
+  const originalAssumeDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+
+  t.after(async () => {
+    if (originalAssumeDifferentOwner === undefined) {
+      delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    } else {
+      process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = originalAssumeDifferentOwner;
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+
+  const sync = new GitHubSync({
+    repoRoot: fixture.workRepo,
+    contentRoot: fixture.dataRoot,
+  });
+
+  const validation = await sync.validateConfiguration();
+  assert.equal(validation.repoRoot, fixture.workRepo);
+  assert.equal(validation.contentRoot, fixture.dataRoot);
+  assert.equal(validation.contentPath, "data");
 });
 
 test("github sync rejects a configured repo root that is not a git repository", async (t) => {
@@ -175,6 +205,42 @@ test("github sync commits and pushes content-only changes", async (t) => {
   assert.equal(collaboratorBody, "# Guide\n\nSynced\n");
 });
 
+test("github sync pushes to a local upstream when Git assumes different ownership", async (t) => {
+  const fixture = await createGitFixture("dacci-github-sync-safe-remote-");
+  const originalAssumeDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+
+  t.after(async () => {
+    if (originalAssumeDifferentOwner === undefined) {
+      delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    } else {
+      process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = originalAssumeDifferentOwner;
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+  await writeFile(path.join(fixture.dataRoot, "Guide.md"), "# Guide\n\nSafe remote\n", "utf8");
+
+  const sync = new GitHubSync({
+    repoRoot: fixture.workRepo,
+    contentRoot: fixture.dataRoot,
+  });
+
+  const result = await sync.pushContent({
+    message: "Sync content updates",
+  });
+
+  assert.equal(result.action, "push");
+  if (originalAssumeDifferentOwner === undefined) {
+    delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+  } else {
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = originalAssumeDifferentOwner;
+  }
+  await runGit(["pull", "--ff-only"], fixture.collaboratorRepo);
+  const collaboratorBody = await readFile(path.join(fixture.collaboratorDataRoot, "Guide.md"), "utf8");
+  assert.equal(collaboratorBody, "# Guide\n\nSafe remote\n");
+});
+
 test("github sync can override the configured remote URL at runtime", async (t) => {
   const fixture = await createGitFixture("dacci-github-sync-remote-url-");
   t.after(async () => {
@@ -195,12 +261,14 @@ test("github sync can override the configured remote URL at runtime", async (t) 
   });
 
   assert.equal(result.action, "push");
+  assert.equal(result.status.remoteName, "origin");
+  assert.equal(result.status.remoteUrl, fixture.remoteRepo);
   await runGit(["pull", "--ff-only"], fixture.collaboratorRepo);
   const collaboratorBody = await readFile(path.join(fixture.collaboratorDataRoot, "Guide.md"), "utf8");
   assert.equal(collaboratorBody, "# Guide\n\nOverridden remote\n");
 });
 
-test("github sync refuses to push when non-content working tree changes exist", async (t) => {
+test("github sync pushes content while leaving non-content working tree changes alone", async (t) => {
   const fixture = await createGitFixture("dacci-github-sync-guard-");
   t.after(async () => {
     await rm(fixture.root, { recursive: true, force: true });
@@ -219,13 +287,105 @@ test("github sync refuses to push when non-content working tree changes exist", 
     contentRoot: fixture.dataRoot,
   });
 
-  await assert.rejects(
-    () =>
-      sync.pushContent({
-        message: "Should fail",
-      }),
-    (error) => error instanceof GitHubSyncError && error.code === "conflict",
+  const statusBeforePush = await sync.getStatus();
+  assert.equal(statusBeforePush.nonContentChangedFiles.length, 1);
+  assert.equal(statusBeforePush.pushBlockers.length, 0);
+
+  const result = await sync.pushContent({
+    message: "Push content only",
+  });
+
+  assert.equal(result.action, "push");
+  assert.equal(result.status.hasContentChanges, false);
+  assert.equal(result.status.nonContentChangedFiles.length, 1);
+  assert.equal(result.status.pushBlockers.length, 0);
+
+  const localNotesBody = await readFile(path.join(fixture.workRepo, "notes.txt"), "utf8");
+  assert.equal(localNotesBody, "tracked and modified\n");
+
+  await runGit(["pull", "--ff-only"], fixture.collaboratorRepo);
+  const collaboratorGuideBody = await readFile(path.join(fixture.collaboratorDataRoot, "Guide.md"), "utf8");
+  assert.equal(collaboratorGuideBody, "# Guide\n\nChanged\n");
+  const collaboratorNotesBody = await readFile(path.join(fixture.collaboratorRepo, "notes.txt"), "utf8");
+  assert.equal(collaboratorNotesBody, "tracked\n");
+});
+
+test("github sync reports Dacci wording for committed non-content changes", async (t) => {
+  const fixture = await createGitFixture("dacci-github-sync-committed-guard-");
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  await writeFile(path.join(fixture.workRepo, "notes.txt"), "tracked\n", "utf8");
+  await runGit(["add", "notes.txt"], fixture.workRepo);
+  await runGit(["commit", "-m", "Track notes"], fixture.workRepo);
+
+  const sync = new GitHubSync({
+    repoRoot: fixture.workRepo,
+    contentRoot: fixture.dataRoot,
+  });
+
+  const status = await sync.getStatus();
+  assert.deepEqual(status.pullBlockers, [
+    "Dacci sync pull only supports content. Move non-content commits off this branch or publish them separately before pulling.",
+  ]);
+  assert.deepEqual(status.pushBlockers, []);
+  assert.ok(
+    status.recommendedActions.includes(
+      "Dacci sync push leaves non-content commits local. Publish them separately if you want them on the remote branch.",
+    ),
+    "expected selective push guidance in recommended actions",
   );
+  assert.ok(
+    status.recommendedActions.includes("Publish non-content commits separately before pulling remote content."),
+    "expected pull guidance for committed non-content changes",
+  );
+});
+
+test("github sync pushes content while keeping committed non-content changes local", async (t) => {
+  const fixture = await createGitFixture("dacci-github-sync-selective-committed-");
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  await writeFile(path.join(fixture.workRepo, "notes.txt"), "tracked\n", "utf8");
+  await runGit(["add", "notes.txt"], fixture.workRepo);
+  await runGit(["commit", "-m", "Track notes"], fixture.workRepo);
+  await runGit(["push", "origin", "main"], fixture.workRepo);
+
+  await writeFile(path.join(fixture.workRepo, "notes.txt"), "local only\n", "utf8");
+  await runGit(["add", "notes.txt"], fixture.workRepo);
+  await runGit(["commit", "-m", "Local notes update"], fixture.workRepo);
+
+  await writeFile(path.join(fixture.dataRoot, "Guide.md"), "# Guide\n\nSelective push content\n", "utf8");
+
+  const sync = new GitHubSync({
+    repoRoot: fixture.workRepo,
+    contentRoot: fixture.dataRoot,
+  });
+
+  const result = await sync.pushContent({
+    message: "Sync content updates",
+  });
+
+  assert.equal(result.action, "push");
+  assert.equal(result.status.behind, 0);
+  assert.deepEqual(result.status.pushBlockers, []);
+  assert.deepEqual(result.status.nonContentCommittedFiles, ["notes.txt"]);
+
+  const aheadFiles = await runGit(["diff", "--name-only", "origin/main..HEAD"], fixture.workRepo);
+  assert.equal(aheadFiles, "notes.txt");
+
+  const localGuideBody = await readFile(path.join(fixture.dataRoot, "Guide.md"), "utf8");
+  assert.equal(localGuideBody, "# Guide\n\nSelective push content\n");
+  const localNotesBody = await readFile(path.join(fixture.workRepo, "notes.txt"), "utf8");
+  assert.equal(localNotesBody, "local only\n");
+
+  await runGit(["pull", "--ff-only"], fixture.collaboratorRepo);
+  const collaboratorGuideBody = await readFile(path.join(fixture.collaboratorDataRoot, "Guide.md"), "utf8");
+  assert.equal(collaboratorGuideBody, "# Guide\n\nSelective push content\n");
+  const collaboratorNotesBody = await readFile(path.join(fixture.collaboratorRepo, "notes.txt"), "utf8");
+  assert.equal(collaboratorNotesBody, "tracked\n");
 });
 
 test("github sync allows untracked non-content files during push", async (t) => {

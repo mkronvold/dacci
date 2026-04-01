@@ -1,6 +1,10 @@
 # Kubernetes deployment
 
-This guide explains what to apply to run the packaged Dacci runtime on Kubernetes.
+Status: archived reference material only. The active product target on this branch is the localhost-only Docker runtime described in `docs/DOCKER.md`. These manifests are no longer part of the routine validation or support path.
+
+This guide explains the legacy Kubernetes package that remains in the repository as reference material.
+
+The active product target on this branch is the localhost-only Docker runtime described in `docs/DOCKER.md`. The Kubernetes assets are still checked in, but they are no longer the primary deployment path or the main validation target.
 
 ## Runtime summary
 

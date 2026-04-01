@@ -19,6 +19,7 @@ interface NavigationPaneProps {
   onToggleTreeNode: (nodePath: string) => void;
   onToggleDocuments: () => void;
   onSelectDocument: (documentPath: string) => void;
+  onClose?: () => void;
 }
 
 interface TreeSectionProps {
@@ -157,8 +158,18 @@ export function NavigationPane(props: NavigationPaneProps) {
 
   return (
     <aside className="panel navigation-pane" ref={props.panelRef}>
-      <div className="panel-header">
+      <div className="panel-header navigation-pane-header">
         <p className="eyebrow viewer-eyebrow">Navigation</p>
+        {props.onClose ? (
+          <button
+            aria-label="Close navigation panel"
+            className="ghost-button side-pane-close"
+            onClick={props.onClose}
+            type="button"
+          >
+            ×
+          </button>
+        ) : null}
       </div>
 
       <div className="form-grid tree-toolbar">

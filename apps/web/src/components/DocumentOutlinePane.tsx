@@ -1,16 +1,33 @@
+import type { Ref } from "react";
+
 import type { HeadingItem } from "../utils/markdownDocument";
 
 interface DocumentOutlinePaneProps {
   headings: HeadingItem[];
   className?: string;
+  panelRef?: Ref<HTMLElement>;
+  onClose?: () => void;
+  closeLabel?: string;
 }
 
 export function DocumentOutlinePane(props: DocumentOutlinePaneProps) {
   const className = props.className ? `reader-outline ${props.className}` : "reader-outline";
 
   return (
-    <aside className={className}>
-      <p className="reader-outline-title">Outline</p>
+    <aside className={className} ref={props.panelRef}>
+      <div className="panel-header reader-outline-header">
+        <p className="reader-outline-title">Outline</p>
+        {props.onClose ? (
+          <button
+            aria-label={props.closeLabel ?? "Close outline"}
+            className="ghost-button side-pane-close"
+            onClick={props.onClose}
+            type="button"
+          >
+            ×
+          </button>
+        ) : null}
+      </div>
       <nav aria-label="Document outline">
         <ul className="outline-list">
           {props.headings.map((heading) => (

@@ -16,6 +16,49 @@ if [[ -z "${content_root}" ]]; then
   fi
 fi
 
-DACCI_CONTENT_ROOT="${content_root}" \
-DACCI_GIT_SSH_DIR="${DACCI_GIT_SSH_DIR:-${HOME}/.ssh}" \
-docker compose -f "${repo_root}/deploy/docker/compose.yaml" up --build -d
+library_workspace_root="${DACCI_LIBRARY_WORKSPACE_ROOT:-}"
+if [[ -z "${library_workspace_root}" ]]; then
+  library_workspace_root="$(cd -- "${content_root}/.." >/dev/null && pwd)"
+fi
+
+if [[ ! -d "${library_workspace_root}" ]]; then
+  printf 'scripts/up: DACCI_LIBRARY_WORKSPACE_ROOT must point at an existing directory\n' >&2
+  exit 1
+fi
+
+host_ssh_dir="${DACCI_HOST_SSH_DIR:-${HOME}/.ssh}"
+if [[ ! -d "${host_ssh_dir}" ]]; then
+  printf 'scripts/up: DACCI_HOST_SSH_DIR must point at an existing SSH directory (default: %s)\n' "${HOME}/.ssh" >&2
+  exit 1
+fi
+
+if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+  if [[ ! -S "${SSH_AUTH_SOCK}" ]]; then
+    printf 'scripts/up: SSH_AUTH_SOCK is set but does not point at a live agent socket\n' >&2
+    exit 1
+  fi
+
+  ssh_auth_sock="${SSH_AUTH_SOCK}"
+  ssh_auth_sock_dir="$(dirname -- "${SSH_AUTH_SOCK}")"
+else
+  ssh_auth_sock=""
+  ssh_auth_sock_dir="${XDG_RUNTIME_DIR:-/tmp}/dacci-empty-ssh-agent"
+  mkdir -p -- "${ssh_auth_sock_dir}"
+fi
+
+content_repo_name="$(basename -- "${content_root}")"
+if [[ "${content_root}" != "${library_workspace_root}" && "${content_root}" != "${library_workspace_root}/"* ]]; then
+  printf 'scripts/up: DACCI_CONTENT_ROOT must be located inside DACCI_LIBRARY_WORKSPACE_ROOT so repos mount under /workspace/<repo-name>\n' >&2
+  exit 1
+fi
+
+compose_env=(
+  "DACCI_CONTENT_ROOT=${content_root}"
+  "DACCI_CONTENT_REPO_NAME=${content_repo_name}"
+  "DACCI_LIBRARY_WORKSPACE_ROOT=${library_workspace_root}"
+  "DACCI_HOST_SSH_DIR=${host_ssh_dir}"
+  "DACCI_SSH_AUTH_SOCK=${ssh_auth_sock}"
+  "DACCI_SSH_AUTH_SOCK_DIR=${ssh_auth_sock_dir}"
+)
+
+env "${compose_env[@]}" docker compose -f "${repo_root}/deploy/docker/compose.yaml" up --build -d

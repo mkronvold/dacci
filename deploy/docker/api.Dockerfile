@@ -31,9 +31,12 @@ ENV HOST=0.0.0.0
 ENV PORT=3000
 ENV DATA_ROOT=/workspace/data
 ENV GIT_SYNC_REPO_ROOT=/workspace
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git openssh-client \
+  && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+  && update-ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 RUN git config --system --add safe.directory /workspace
