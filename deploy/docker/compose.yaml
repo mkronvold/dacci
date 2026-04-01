@@ -6,23 +6,28 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 3000
-      DATA_ROOT: /workspace/data
-      GIT_SYNC_REPO_ROOT: /workspace
+      DATA_ROOT: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}/data
+      GIT_SYNC_REPO_ROOT: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}
       GIT_SYNC_REMOTE_URL: ${GIT_SYNC_REMOTE_URL:-}
-      GIT_SSH_COMMAND: ssh -i /var/run/dacci-git/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/run/dacci-git/known_hosts
+      DACCI_LIBRARY_ROOTS: ${DACCI_LIBRARY_ROOTS:-/workspace}
+      SSH_AUTH_SOCK: ${DACCI_SSH_AUTH_SOCK:-}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
     volumes:
       - type: bind
-        source: ${DACCI_CONTENT_ROOT:-../../../E2Open.KPE.Content}
+        source: ${DACCI_LIBRARY_WORKSPACE_ROOT:-../../../}
         target: /workspace
       - type: bind
         source: ${DACCI_CONTENT_ROOT:-../../../E2Open.KPE.Content}/data
-        target: /workspace/data
+        target: /workspace/${DACCI_CONTENT_REPO_NAME:-E2Open.KPE.Content}/data
       - type: bind
-        source: ${DACCI_GIT_SSH_DIR:-./git-ssh}
-        target: /var/run/dacci-git
+        source: ${DACCI_HOST_SSH_DIR:-./git-ssh}
+        target: /root/.ssh
+        read_only: true
+      - type: bind
+        source: ${DACCI_SSH_AUTH_SOCK_DIR:-/tmp/dacci-empty-ssh-agent}
+        target: ${DACCI_SSH_AUTH_SOCK_DIR:-/tmp/dacci-empty-ssh-agent}
         read_only: true
     healthcheck:
       test:
@@ -44,12 +49,12 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 4173
-      WEB_API_BASE_URL: http://localhost:3000
+      WEB_API_BASE_URL: http://127.0.0.1:3000
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "4173:4173"
+      - "127.0.0.1:4173:4173"
     restart: unless-stopped
     healthcheck:
       test:

@@ -1,9 +1,13 @@
+import type { RefObject } from "react";
+
 import type { GitSyncStatus } from "@dacci/shared-types";
 
+import { GitAccessGuidance, isLikelyGitAuthenticationError } from "./GitAccessGuidance";
 import { SyncStatusSummary } from "./SyncStatusSummary";
 
 interface SyncPaneProps {
   busy: boolean;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
   syncStatus: GitSyncStatus | null;
   syncError: string | null;
   selectedDocumentChanged: boolean;
@@ -24,6 +28,10 @@ interface SyncPaneProps {
   onResumeSyncSchedule: () => void;
 }
 
+function isConfiguredRepositoryOnlySchedulerReason(reason?: string): boolean {
+  return (reason ?? "").toLowerCase().includes("configured repository");
+}
+
 export function SyncPane(props: SyncPaneProps) {
   const pushAvailable =
     Boolean(props.syncStatus) &&
@@ -31,6 +39,8 @@ export function SyncPane(props: SyncPaneProps) {
     props.syncPushMessage.trim().length > 0 &&
     (props.syncStatus?.pushBlockers.length ?? 0) === 0;
   const hasContentToPush = (props.syncStatus?.changedFiles.length ?? 0) > 0;
+  const scheduleSupported = props.syncStatus?.schedulerSupported !== false;
+  const showGitAccessGuidance = isLikelyGitAuthenticationError(props.syncError);
   const syncPushButtonClassName = pushAvailable
     ? hasContentToPush
       ? "primary-button sync-push-button ready"
@@ -43,6 +53,7 @@ export function SyncPane(props: SyncPaneProps) {
         <div>
           <p className="eyebrow viewer-eyebrow">Sync</p>
           <h2>Content sync status</h2>
+          {props.syncStatus?.repo ? <p className="muted">Active repository: {props.syncStatus.repo.name}</p> : null}
         </div>
         <button
           aria-label="Close sync panel"
@@ -54,7 +65,18 @@ export function SyncPane(props: SyncPaneProps) {
         </button>
       </div>
 
-      <div className="management-pane-scroll">
+      <div className="management-pane-scroll" ref={props.scrollContainerRef}>
+        {showGitAccessGuidance ? (
+          <section className="management-card">
+            <div className="panel-header">
+              <div>
+                <h3>Local Git access</h3>
+                <GitAccessGuidance />
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         <section className="management-card">
           <div className="panel-header">
             <div>
@@ -118,6 +140,7 @@ export function SyncPane(props: SyncPaneProps) {
               <label>
                 <span>Background sync</span>
                 <select
+                  disabled={!scheduleSupported || props.busy}
                   onChange={(event) => props.onSyncScheduleEnabledChange(event.target.value === "enabled")}
                   value={props.syncScheduleForm.enabled ? "enabled" : "disabled"}
                 >
@@ -129,6 +152,7 @@ export function SyncPane(props: SyncPaneProps) {
               <label>
                 <span>Interval (minutes)</span>
                 <input
+                  disabled={!scheduleSupported || props.busy}
                   inputMode="numeric"
                   max={1440}
                   min={1}
@@ -139,10 +163,15 @@ export function SyncPane(props: SyncPaneProps) {
               </label>
 
               <div className="inline-actions">
-                <button className="ghost-button" disabled={props.busy} onClick={props.onConfigureSyncSchedule} type="button">
+                <button
+                  className="ghost-button"
+                  disabled={props.busy || !scheduleSupported}
+                  onClick={props.onConfigureSyncSchedule}
+                  type="button"
+                >
                   Save schedule
                 </button>
-                {props.syncStatus.scheduler?.enabled ? (
+                {scheduleSupported && props.syncStatus.scheduler?.enabled ? (
                   props.syncStatus.scheduler.paused ? (
                     <button className="ghost-button" disabled={props.busy} onClick={props.onResumeSyncSchedule} type="button">
                       Resume schedule
@@ -156,7 +185,11 @@ export function SyncPane(props: SyncPaneProps) {
               </div>
 
               <p className="muted">
-                Background sync only performs guarded pulls. Push remains manual, and conflicts or blockers pause the schedule.
+                {scheduleSupported
+                  ? "Background sync only performs guarded pulls. Push remains manual, and conflicts or blockers pause the schedule."
+                  : isConfiguredRepositoryOnlySchedulerReason(props.syncStatus.schedulerUnsupportedReason)
+                    ? "Only for configured repository"
+                    : props.syncStatus.schedulerUnsupportedReason ?? "Background sync scheduling is unavailable for this repository."}
               </p>
             </div>
           </section>

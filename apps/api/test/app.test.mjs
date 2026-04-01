@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { buildApp, validateAppRuntimeConfiguration } from "../dist/app.js";
 
 const execFileAsync = promisify(execFile);
+const repoSelectionHeaderName = "x-dacci-repo-selection";
 
 async function createTempDataRoot(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -23,6 +24,46 @@ async function runGit(args, cwd) {
       GIT_TERMINAL_PROMPT: "0",
     },
   });
+}
+
+async function createGitBackedContentRepo(prefix, files, baseDir) {
+  const repoRoot = baseDir ? await mkdtemp(path.join(baseDir, prefix)) : await createTempDataRoot(prefix);
+  const dataRoot = path.join(repoRoot, "data");
+  await mkdir(dataRoot, { recursive: true });
+
+  for (const file of files) {
+    const absolutePath = path.join(dataRoot, file.path);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, file.body, "utf8");
+  }
+
+  await runGit(["init", "--initial-branch=main"], repoRoot);
+  await runGit(["config", "user.name", "API Repo Test"], repoRoot);
+  await runGit(["config", "user.email", "api-repo@example.com"], repoRoot);
+  await runGit(["add", "data"], repoRoot);
+  await runGit(["commit", "-m", "Initial content"], repoRoot);
+
+  return {
+    repoRoot,
+    dataRoot,
+  };
+}
+
+function createLibrarySelectionHeader(repo) {
+  return encodeURIComponent(
+    JSON.stringify({
+      kind: "library",
+      repo,
+    }),
+  );
+}
+
+async function addLocalOrigin(repoRoot) {
+  const remoteRepo = `${repoRoot}.origin.git`;
+  await runGit(["init", "--bare", "--initial-branch=main", remoteRepo], path.dirname(repoRoot));
+  await runGit(["remote", "add", "origin", remoteRepo], repoRoot);
+  await runGit(["push", "-u", "origin", "main"], repoRoot);
+  return remoteRepo;
 }
 
 test("api returns 400 when document path is missing", async (t) => {
@@ -47,12 +88,21 @@ test("api returns 400 when document path is missing", async (t) => {
 });
 
 test("api advertises the phase 12 runtime endpoints", async (t) => {
-  const dataRoot = await createTempDataRoot("dacci-api-info-");
-  const app = await buildApp({ dataRoot, gitSyncRepoRoot: dataRoot });
+  const repoRoot = await createTempDataRoot("dacci-api-info-");
+  const dataRoot = path.join(repoRoot, "data");
+  await mkdir(dataRoot, { recursive: true });
+  await runGit(["init", "--initial-branch=main"], repoRoot);
+  await runGit(["config", "user.name", "API Info Test"], repoRoot);
+  await runGit(["config", "user.email", "api-info@example.com"], repoRoot);
+  const app = await buildApp({
+    dataRoot,
+    gitSyncRepoRoot: repoRoot,
+    gitSyncRemoteUrl: "git@github.com:mkronvold-wtg/E2open.KPE.Config.git",
+  });
 
   t.after(async () => {
     await app.close();
-    await rm(dataRoot, { recursive: true, force: true });
+    await rm(repoRoot, { recursive: true, force: true });
   });
 
   const response = await app.inject({
@@ -64,6 +114,11 @@ test("api advertises the phase 12 runtime endpoints", async (t) => {
   const body = response.json();
   assert.equal(body.phase, "dacci-public-seed");
   assert.equal(body.service, "Dacci API");
+  assert.equal(body.configuredRepo.id, "configured-repo");
+  assert.equal(body.configuredRepo.name, "mkronvold-wtg/E2open.KPE.Config");
+  assert.equal(body.configuredRepo.repoRoot, repoRoot);
+  assert.equal(body.configuredRepo.dataRoot, dataRoot);
+  assert.equal(body.configuredRepo.releaseBranch, "default");
   assert.ok(body.endpoints.includes("/ready"));
   assert.ok(body.endpoints.includes("/api/search"));
   assert.ok(body.endpoints.includes("/api/import/documents"));
@@ -189,15 +244,17 @@ test("api allows browser preflight requests for document writes", async (t) => {
     headers: {
       origin: "http://localhost:5173",
       "access-control-request-method": "PUT",
-      "access-control-request-headers": "content-type",
+      "access-control-request-headers": `content-type, ${repoSelectionHeaderName}`,
     },
   });
 
   assert.equal(response.statusCode, 204);
   assert.equal(response.headers["access-control-allow-origin"], "http://localhost:5173");
+  assert.equal(response.headers["access-control-allow-credentials"], "true");
   assert.match(response.headers["access-control-allow-methods"], /\bPUT\b/);
   assert.match(response.headers["access-control-allow-methods"], /\bPATCH\b/);
   assert.match(response.headers["access-control-allow-methods"], /\bDELETE\b/);
+  assert.match(response.headers["access-control-allow-headers"], /\bx-dacci-repo-selection\b/i);
 });
 
 test("api supports logical topic-level document lifecycle", async (t) => {
@@ -370,6 +427,289 @@ test("api configures, pauses, and resumes background sync", async (t) => {
   assert.equal(resumeResponse.statusCode, 200);
   assert.equal(resumeResponse.json().status.scheduler.enabled, true);
   assert.equal(resumeResponse.json().status.scheduler.paused, false);
+});
+
+test("api switches tree requests between the default repo and a selected library repo", async (t) => {
+  const workspaceRoot = await createTempDataRoot("dacci-api-multirepo-");
+  const defaultRepo = await createGitBackedContentRepo("dacci-api-multirepo-default-", [
+    {
+      path: "Default Topic/Default Guide.md",
+      body: "# Default\n",
+    },
+  ]);
+  const libraryRepo = await createGitBackedContentRepo("dacci-api-multirepo-library-", [
+    {
+      path: "Library Topic/Library Guide.md",
+      body: "# Library\n",
+    },
+  ]);
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [path.dirname(libraryRepo.repoRoot), workspaceRoot],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRepo.repoRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+
+  const defaultTreeResponse = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+  });
+  assert.equal(defaultTreeResponse.statusCode, 200);
+  assert.equal(defaultTreeResponse.json().topics[0].name, "Default Topic");
+
+  const configuredRepoSelectionResponse = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader({
+        id: "configured-repo",
+        name: "Configured repository",
+        repoRoot: defaultRepo.repoRoot,
+        dataRoot: defaultRepo.dataRoot,
+      }),
+    },
+  });
+  assert.equal(configuredRepoSelectionResponse.statusCode, 200);
+  assert.equal(configuredRepoSelectionResponse.json().topics[0].name, "Default Topic");
+
+  const librarySelection = {
+    id: "library-example",
+    name: "Library Example",
+    repoRoot: libraryRepo.repoRoot,
+  };
+  const libraryTreeResponse = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader(librarySelection),
+    },
+  });
+  assert.equal(libraryTreeResponse.statusCode, 200);
+  assert.equal(libraryTreeResponse.json().topics[0].name, "Library Topic");
+
+  const defaultTreeAfterSwitchResponse = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+  });
+  assert.equal(defaultTreeAfterSwitchResponse.statusCode, 200);
+  assert.equal(defaultTreeAfterSwitchResponse.json().topics[0].name, "Default Topic");
+});
+
+test("api validates library repositories through the library test endpoint", async (t) => {
+  const defaultRepo = await createGitBackedContentRepo("dacci-api-library-test-default-", [
+    {
+      path: "Default Topic/Default Guide.md",
+      body: "# Default\n",
+    },
+  ]);
+  const libraryRepo = await createGitBackedContentRepo("dacci-api-library-test-library-", [
+    {
+      path: "Library Topic/Library Guide.md",
+      body: "# Library\n",
+    },
+    {
+      path: "Library Topic/Runbooks/Deploy Guide.md",
+      body: "# Deploy\n",
+    },
+  ]);
+  const libraryRemoteRepo = await addLocalOrigin(libraryRepo.repoRoot);
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [path.dirname(libraryRepo.repoRoot)],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRemoteRepo, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/library/test",
+    payload: {
+      repo: {
+        id: "library-example",
+        name: "Library Example",
+        repoRoot: libraryRepo.repoRoot,
+        releaseBranch: "main",
+      },
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.repo.name, "Library Example");
+  assert.equal(body.repo.kind, "library");
+  assert.equal(body.repo.repoRoot, libraryRepo.repoRoot);
+  assert.equal(body.repo.dataRoot, libraryRepo.dataRoot);
+  assert.equal(body.repo.releaseBranch, "main");
+  assert.equal(body.content.topicCount, 1);
+  assert.equal(body.content.documentCount, 2);
+  assert.equal(body.git.currentBranch, "main");
+});
+
+test("api reports repo context and schedule limitations for selected library repos", async (t) => {
+  const defaultRepo = await createGitBackedContentRepo("dacci-api-library-status-default-", [
+    {
+      path: "Default Topic/Default Guide.md",
+      body: "# Default\n",
+    },
+  ]);
+  const libraryRepo = await createGitBackedContentRepo("dacci-api-library-status-library-", [
+    {
+      path: "Library Topic/Library Guide.md",
+      body: "# Library\n",
+    },
+  ]);
+  const libraryRemoteRepo = await addLocalOrigin(libraryRepo.repoRoot);
+  await runGit(["remote", "set-url", "origin", "git@github.com:mkronvold/Dacci.Example.Content.git"], libraryRepo.repoRoot);
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [path.dirname(libraryRepo.repoRoot)],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRemoteRepo, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/sync/status",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader({
+        id: "library-example",
+        name: "Library Example",
+        repoRoot: libraryRepo.repoRoot,
+        releaseBranch: "main",
+      }),
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.repo.name, "mkronvold/Dacci.Example.Content");
+  assert.equal(body.repo.kind, "library");
+  assert.equal(body.repo.releaseBranch, "main");
+  assert.equal(body.releaseBranch, "main");
+  assert.equal(body.isReleaseBranch, true);
+  assert.equal(body.remoteName, "origin");
+  assert.equal(body.remoteUrl, "git@github.com:mkronvold/Dacci.Example.Content.git");
+  assert.equal(body.schedulerSupported, false);
+  assert.equal(
+    body.schedulerUnsupportedReason,
+    "Background sync scheduling is only available for the configured repository.",
+  );
+});
+
+test("api rejects background sync schedule changes for selected library repos", async (t) => {
+  const defaultRepo = await createGitBackedContentRepo("dacci-api-library-schedule-default-", [
+    {
+      path: "Default Topic/Default Guide.md",
+      body: "# Default\n",
+    },
+  ]);
+  const libraryRepo = await createGitBackedContentRepo("dacci-api-library-schedule-library-", [
+    {
+      path: "Library Topic/Library Guide.md",
+      body: "# Library\n",
+    },
+  ]);
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [path.dirname(libraryRepo.repoRoot)],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(libraryRepo.repoRoot, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/sync/schedule/pause",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader({
+        id: "library-example",
+        name: "Library Example",
+        repoRoot: libraryRepo.repoRoot,
+      }),
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.match(response.json().message, /only available for the configured repository/i);
+});
+
+test("api rejects library repo selections outside configured library roots", async (t) => {
+  const allowedParent = await createTempDataRoot("dacci-api-library-roots-allowed-parent-");
+  const blockedParent = await createTempDataRoot("dacci-api-library-roots-blocked-parent-");
+  const defaultRepo = await createGitBackedContentRepo("dacci-api-library-roots-default-", [
+    {
+      path: "Default Topic/Default Guide.md",
+      body: "# Default\n",
+    },
+  ]);
+  const allowedRepo = await createGitBackedContentRepo("dacci-api-library-roots-allowed-", [
+    {
+      path: "Allowed Topic/Allowed Guide.md",
+      body: "# Allowed\n",
+    },
+  ], allowedParent);
+  const blockedRepo = await createGitBackedContentRepo("dacci-api-library-roots-blocked-", [
+    {
+      path: "Blocked Topic/Blocked Guide.md",
+      body: "# Blocked\n",
+    },
+  ], blockedParent);
+
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepoRoots: [path.dirname(allowedRepo.repoRoot)],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(allowedRepo.repoRoot, { recursive: true, force: true });
+    await rm(blockedRepo.repoRoot, { recursive: true, force: true });
+    await rm(allowedParent, { recursive: true, force: true });
+    await rm(blockedParent, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+    headers: {
+      [repoSelectionHeaderName]: createLibrarySelectionHeader({
+        id: "blocked-library",
+        name: "Blocked Library",
+        repoRoot: blockedRepo.repoRoot,
+      }),
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.match(response.json().message, /outside the configured library roots/i);
 });
 
 test("api exposes tag-aware search results and document tags", async (t) => {

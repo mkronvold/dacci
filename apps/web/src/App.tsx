@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  configuredRepoId,
+  repoSelectionHeaderName,
+} from "@dacci/shared-types";
 import type {
+  ApiInfoResponse,
   ContentDocument,
   ContentExportBundle,
-  ImportConflictMode,
-  ImportFormat,
-  ImportFolderMappingMode,
   ContentSearchResponse,
   ContentSubtopicNode,
   ContentTopicNode,
   ContentTree,
+  ImportConflictMode,
+  ImportFormat,
+  ImportFolderMappingMode,
   CreateDocumentRequest,
   CreateSubtopicRequest,
   CreateTopicRequest,
@@ -17,19 +22,23 @@ import type {
   DeleteSubtopicRequest,
   DeleteTopicRequest,
   ExportDocumentsRequest,
-    ExportDocumentsResponse,
-    ExportFormat,
-    ExportScope,
-    GitSyncOperationResponse,
-    GitSyncScheduleResponse,
-    GitSyncStatus,
-    HealthCheckResponse,
-    ImportDocumentsRequest,
+  ExportDocumentsResponse,
+  ExportFormat,
+  ExportScope,
+  GitSyncOperationResponse,
+  GitSyncScheduleResponse,
+  GitSyncStatus,
+  HealthCheckResponse,
+  ImportDocumentsRequest,
   ImportDocumentsResponse,
+  LibraryRepoTestResponse,
   MoveDocumentRequest,
+  RepoContextSummary,
   RenameDocumentRequest,
   RenameSubtopicRequest,
   RenameTopicRequest,
+  RepoSelection,
+  SavedLibraryRepoDefinition,
   UpdateDocumentRequest,
 } from "@dacci/shared-types";
 
@@ -49,14 +58,30 @@ import {
   stripFrontMatter,
   updateDocumentTags,
 } from "./utils/markdownDocument";
+import {
+  buildRepoSelection,
+  createConfiguredLibraryRepo,
+  encodeRepoSelectionHeaderValue,
+  findSavedLibraryRepo,
+  isConfiguredLibraryRepo,
+  readPersistedLibraryState,
+  reconcileLibraryState,
+  toLibraryRepoDefinition,
+  writePersistedLibraryState,
+} from "./utils/libraryRepos";
 
 const defaultApiBaseUrl = "http://localhost:3000";
+const createContentRepoGuideUrl = "https://github.com/mkronvold/Dacci.Example.Content/blob/main/README.md";
 const navigationTreeStateStorageKeyPrefix = "dacci.navigation.collapsed";
 const uiToggleStateStorageKeyPrefix = "dacci.ui.toggles";
 
 interface AppProps {
   apiBaseUrl?: string;
 }
+
+type RequestRepoContext = {
+  repoSelection?: RepoSelection;
+};
 
 type TopicFormState = {
   name: string;
@@ -102,6 +127,26 @@ type SyncScheduleFormState = {
   enabled: boolean;
   intervalMinutes: string;
 };
+
+type LibraryRepoFormState = {
+  id: string | null;
+  source: "configured" | "saved" | null;
+  name: string;
+  repoRoot: string;
+  dataRoot: string;
+  releaseBranch: string;
+};
+
+function createEmptyLibraryRepoFormState(): LibraryRepoFormState {
+  return {
+    id: null,
+    source: null,
+    name: "",
+    repoRoot: "",
+    dataRoot: "",
+    releaseBranch: "",
+  };
+}
 
 type DocumentMode = "view" | "edit";
 
@@ -334,9 +379,23 @@ function buildApiUnavailableMessage(apiBaseUrl: string, resource: string): strin
   return `Could not complete the browser request to the API at ${apiBaseUrl} while requesting '${resource}'. Confirm 'npm run dev' started the API, that port 3000 is available, and that the API allows this cross-origin request.`;
 }
 
-async function requestApi<T>(apiBaseUrl: string, resource: string, init?: RequestInit): Promise<T> {
+async function requestApi<T>(
+  apiBaseUrl: string,
+  resource: string,
+  init?: RequestInit,
+  repoContext?: RequestRepoContext,
+): Promise<T> {
   try {
-    const response = await fetch(buildApiUrl(apiBaseUrl, resource), init);
+    const headers = new Headers(init?.headers);
+    if (repoContext?.repoSelection) {
+      headers.set(repoSelectionHeaderName, encodeRepoSelectionHeaderValue(repoContext.repoSelection));
+    }
+
+    const response = await fetch(buildApiUrl(apiBaseUrl, resource), {
+      ...init,
+      credentials: "include",
+      headers,
+    });
     return await parseJsonResponse<T>(response);
   } catch (error) {
     if (error instanceof TypeError) {
@@ -351,9 +410,19 @@ async function requestApiNoContent(
   apiBaseUrl: string,
   resource: string,
   init?: RequestInit,
+  repoContext?: RequestRepoContext,
 ): Promise<void> {
   try {
-    const response = await fetch(buildApiUrl(apiBaseUrl, resource), init);
+    const headers = new Headers(init?.headers);
+    if (repoContext?.repoSelection) {
+      headers.set(repoSelectionHeaderName, encodeRepoSelectionHeaderValue(repoContext.repoSelection));
+    }
+
+    const response = await fetch(buildApiUrl(apiBaseUrl, resource), {
+      ...init,
+      credentials: "include",
+      headers,
+    });
     if (!response.ok) {
       await parseJsonResponse(response);
     }
@@ -385,6 +454,8 @@ function buildApiUrl(apiBaseUrl: string, resource: string): string {
 export function App(props: AppProps) {
   const apiBaseUrl = props.apiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl;
   const persistedUiToggleState = useMemo(() => readPersistedUiToggleState(apiBaseUrl), [apiBaseUrl]);
+  const persistedLibraryState = useMemo(() => readPersistedLibraryState(apiBaseUrl), [apiBaseUrl]);
+  const [apiInfo, setApiInfo] = useState<ApiInfoResponse | null>(null);
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [syncStatus, setSyncStatus] = useState<GitSyncStatus | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -449,16 +520,26 @@ export function App(props: AppProps) {
     enabled: false,
     intervalMinutes: "15",
   });
+  const [libraryEntries, setLibraryEntries] = useState<SavedLibraryRepoDefinition[]>(persistedLibraryState.entries);
+  const [selectedRepoId, setSelectedRepoId] = useState(persistedLibraryState.lastViewedRepoId);
+  const [libraryRepoForm, setLibraryRepoForm] = useState<LibraryRepoFormState>(createEmptyLibraryRepoFormState);
+  const [libraryTestResult, setLibraryTestResult] = useState<LibraryRepoTestResponse | null>(null);
+  const [libraryImportInputKey, setLibraryImportInputKey] = useState(0);
   const [outlineOpen, setOutlineOpen] = useState(persistedUiToggleState.outlineOpen);
   const [showTags, setShowTags] = useState(persistedUiToggleState.showTags);
   const [showHidden, setShowHidden] = useState(persistedUiToggleState.showHidden);
   const heroCardRef = useRef<HTMLElement | null>(null);
   const navigationPaneRef = useRef<HTMLElement | null>(null);
+  const externalOutlineRef = useRef<HTMLElement | null>(null);
   const viewerPanelRef = useRef<HTMLElement | null>(null);
   const sidePanelShellRef = useRef<HTMLElement | null>(null);
+  const libraryPaneScrollRef = useRef<HTMLDivElement | null>(null);
+  const syncPaneScrollRef = useRef<HTMLDivElement | null>(null);
+  const libraryEditSectionRef = useRef<HTMLElement | null>(null);
   const documentEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const previousNavigationPaneOpenRef = useRef(navigationPaneOpen);
   const previousOpenSidePanelRef = useRef<OpenSidePanel>(null);
+  const previousOutlineOpenRef = useRef(outlineOpen);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
 
   const topicOptions = tree?.topics ?? [];
@@ -502,21 +583,93 @@ export function App(props: AppProps) {
   const showTagToggle = documentMode === "view";
   const showHiddenToggle = documentMode === "view";
   const showDocumentOutline = documentMode === "view" && outlineOpen && selectedDocumentHeadings.length > 1;
-  const showExternalOutline = navigationPaneOpen && showDocumentOutline;
+  const showExternalOutline = showDocumentOutline;
+  const showInlineOutline = showDocumentOutline;
   const selectedDocumentHasFrontMatter = selectedDocumentFrontMatterBlock !== null;
+  const configuredLibraryRepo = useMemo(
+    () => (apiInfo ? createConfiguredLibraryRepo(apiInfo.configuredRepo) : null),
+    [apiInfo],
+  );
+  const scrollPaneSectionIntoView = useCallback((container: HTMLDivElement | null, element: HTMLElement | null) => {
+    if (!element) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      if (!container || container.scrollHeight <= container.clientHeight + 1) {
+        element.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+          inline: "nearest",
+        });
+        return;
+      }
+
+      const containerRect = container.getBoundingClientRect();
+      const elementRect = element.getBoundingClientRect();
+      const scrollMarginTop = Number.parseFloat(window.getComputedStyle(element).scrollMarginTop || "0");
+      const targetTop =
+        container.scrollTop +
+        (elementRect.top - containerRect.top) -
+        (Number.isFinite(scrollMarginTop) ? scrollMarginTop : 0);
+
+      container.scrollTo({
+        top: Math.max(0, targetTop),
+        behavior: "smooth",
+      });
+    });
+  }, []);
+  const revealLibraryEditPane = useCallback(() => {
+    setOpenSidePanel("library");
+    scrollPaneSectionIntoView(libraryPaneScrollRef.current, libraryEditSectionRef.current);
+  }, [scrollPaneSectionIntoView]);
   const workspaceShellClassName = [
     "workspace-shell",
-    showExternalOutline ? "with-document-outline" : "",
     navigationPaneOpen ? "" : "without-navigation",
   ]
     .filter(Boolean)
     .join(" ");
+  const activeRepoSelection = useMemo(
+    () => buildRepoSelection(selectedRepoId, libraryEntries),
+    [libraryEntries, selectedRepoId],
+  );
+  const activeRepoLabel =
+    findSavedLibraryRepo(libraryEntries, selectedRepoId)?.name ?? configuredLibraryRepo?.name ?? "Configured repository";
+  const selectedLibraryRepo =
+    findSavedLibraryRepo(libraryEntries, selectedRepoId) ?? null;
+  const updateSavedRepoFromSummary = useCallback((summary: RepoContextSummary) => {
+    setLibraryEntries((current) => {
+      const repo = findSavedLibraryRepo(current, summary.id);
+      if (!repo) {
+        return current;
+      }
+
+      const nextRepo = applyRepoSummaryToSavedRepo(repo, summary);
+      return savedLibraryRepoEquals(repo, nextRepo) ? current : upsertLibraryRepo(current, nextRepo);
+    });
+  }, []);
+  const requestSelectedRepoApi = useCallback(
+    function requestSelectedRepoApi<T>(resource: string, init?: RequestInit): Promise<T> {
+      return requestApi<T>(apiBaseUrl, resource, init, {
+        repoSelection: activeRepoSelection,
+      });
+    },
+    [activeRepoSelection, apiBaseUrl],
+  );
+  const requestSelectedRepoApiNoContent = useCallback(
+    (resource: string, init?: RequestInit): Promise<void> => {
+      return requestApiNoContent(apiBaseUrl, resource, init, {
+        repoSelection: activeRepoSelection,
+      });
+    },
+    [activeRepoSelection, apiBaseUrl],
+  );
 
   const loadDocumentAtPath = useCallback(
     async (documentPath: string) => {
       const query = new URLSearchParams();
       query.set("path", documentPath);
-      const body = await requestApi<ContentDocument>(apiBaseUrl, `/api/documents?${query.toString()}`);
+      const body = await requestSelectedRepoApi<ContentDocument>(`/api/documents?${query.toString()}`);
       setSelectedDocument(body);
       setSelectedDocumentDraft(body.body);
       setRenameDocumentState({ nextName: body.name });
@@ -530,7 +683,7 @@ export function App(props: AppProps) {
         subtopicName: body.subtopicName ?? "",
       }));
     },
-    [apiBaseUrl],
+    [requestSelectedRepoApi],
   );
 
   const loadSyncStatus = useCallback(
@@ -542,11 +695,13 @@ export function App(props: AppProps) {
         }
 
         const queryString = query.toString();
-        const body = await requestApi<GitSyncStatus>(
-          apiBaseUrl,
+        const body = await requestSelectedRepoApi<GitSyncStatus>(
           `/api/sync/status${queryString ? `?${queryString}` : ""}`,
         );
         setSyncStatus(body);
+        if (body.repo) {
+          updateSavedRepoFromSummary(body.repo);
+        }
         setSyncError(null);
         return body;
       } catch (loadError) {
@@ -556,12 +711,12 @@ export function App(props: AppProps) {
         return null;
       }
     },
-    [apiBaseUrl],
+    [requestSelectedRepoApi, updateSavedRepoFromSummary],
   );
 
   const loadTree = useCallback(
     async (preferredDocumentPath?: string | null) => {
-      const treeBody = await requestApi<ContentTree>(apiBaseUrl, "/api/tree");
+      const treeBody = await requestSelectedRepoApi<ContentTree>("/api/tree");
       setTree(treeBody);
 
       const nextSelectedDocumentPath =
@@ -572,23 +727,25 @@ export function App(props: AppProps) {
       setSelectedDocumentPath(nextSelectedDocumentPath);
       return treeBody;
     },
-    [apiBaseUrl, selectedDocumentPath],
+    [requestSelectedRepoApi, selectedDocumentPath],
   );
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadInitialState() {
+    async function loadRuntimeInfo() {
       try {
-        const healthBody = await requestApi<HealthCheckResponse>(apiBaseUrl, "/health");
+        const [apiInfoBody, healthBody] = await Promise.all([
+          requestApi<ApiInfoResponse>(apiBaseUrl, "/api"),
+          requestApi<HealthCheckResponse>(apiBaseUrl, "/health"),
+        ]);
 
         if (cancelled) {
           return;
         }
 
+        setApiInfo(apiInfoBody);
         setHealth(healthBody);
-        await loadTree();
-        await loadSyncStatus();
       } catch (loadError) {
         if (!cancelled) {
           console.warn("Failed to load initial app state.", loadError);
@@ -597,12 +754,12 @@ export function App(props: AppProps) {
       }
     }
 
-    void loadInitialState();
+    void loadRuntimeInfo();
 
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, loadSyncStatus, loadTree]);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     const scheduler = syncStatus?.scheduler;
@@ -626,6 +783,73 @@ export function App(props: AppProps) {
   }, [persistedUiToggleState]);
 
   useEffect(() => {
+    setLibraryEntries(persistedLibraryState.entries);
+    setSelectedRepoId(persistedLibraryState.lastViewedRepoId);
+    setLibraryRepoForm(createEmptyLibraryRepoFormState());
+    setLibraryTestResult(null);
+    setLibraryImportInputKey(0);
+  }, [persistedLibraryState]);
+
+  useEffect(() => {
+    if (!configuredLibraryRepo) {
+      return;
+    }
+
+    const nextState = reconcileLibraryState(libraryEntries, selectedRepoId, configuredLibraryRepo);
+    if (!savedLibraryRepoListEquals(libraryEntries, nextState.entries)) {
+      setLibraryEntries(nextState.entries);
+    }
+    if (nextState.lastViewedRepoId !== selectedRepoId) {
+      setSelectedRepoId(nextState.lastViewedRepoId);
+    }
+  }, [configuredLibraryRepo, libraryEntries, selectedRepoId]);
+
+  useEffect(() => {
+    if (libraryEntries.some((entry) => entry.id === selectedRepoId) || selectedRepoId === configuredRepoId) {
+      return;
+    }
+
+    setSelectedRepoId(configuredRepoId);
+  }, [libraryEntries, selectedRepoId]);
+
+  useEffect(() => {
+    if (!libraryPaneOpen || !libraryRepoForm.id) {
+      return;
+    }
+
+    scrollPaneSectionIntoView(libraryPaneScrollRef.current, libraryEditSectionRef.current);
+  }, [libraryPaneOpen, libraryRepoForm.id, scrollPaneSectionIntoView]);
+
+  useEffect(() => {
+    if (!apiInfo) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadSelectedRepoState() {
+      try {
+        await loadTree();
+        if (cancelled) {
+          return;
+        }
+        await loadSyncStatus();
+      } catch (loadError) {
+        if (!cancelled) {
+          console.warn("Failed to load selected repository state.", loadError);
+          setError(loadError instanceof Error ? loadError.message : "Unknown error");
+        }
+      }
+    }
+
+    void loadSelectedRepoState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiInfo, loadSyncStatus, loadTree]);
+
+  useEffect(() => {
     if (!selectedDocumentPath) {
       setSelectedDocument(null);
       setSelectedDocumentDraft("");
@@ -637,8 +861,7 @@ export function App(props: AppProps) {
 
     async function loadDocument() {
       try {
-        const body = await requestApi<ContentDocument>(
-          apiBaseUrl,
+        const body = await requestSelectedRepoApi<ContentDocument>(
           `/api/documents?${new URLSearchParams({ path: documentPath }).toString()}`,
         );
         if (!cancelled) {
@@ -658,6 +881,8 @@ export function App(props: AppProps) {
       } catch (loadError) {
         if (!cancelled) {
           console.warn(`Failed to load document '${documentPath}'.`, loadError);
+          setSelectedDocument(null);
+          setSelectedDocumentDraft("");
           setError(loadError instanceof Error ? loadError.message : "Unknown error");
         }
       }
@@ -668,7 +893,7 @@ export function App(props: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, selectedDocumentPath]);
+  }, [requestSelectedRepoApi, selectedDocumentPath]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -719,7 +944,7 @@ export function App(props: AppProps) {
         try {
           const query = new URLSearchParams();
           query.set("query", normalizedQuery);
-          const body = await requestApi<ContentSearchResponse>(apiBaseUrl, `/api/search?${query.toString()}`);
+          const body = await requestSelectedRepoApi<ContentSearchResponse>(`/api/search?${query.toString()}`);
           if (!cancelled) {
             setSearchResponse(body);
           }
@@ -736,7 +961,7 @@ export function App(props: AppProps) {
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [apiBaseUrl, searchQuery]);
+  }, [requestSelectedRepoApi, searchQuery]);
 
   useEffect(() => {
     if (!tree) {
@@ -867,7 +1092,7 @@ export function App(props: AppProps) {
   const handleCreateTopic = useCallback(() => {
     void runAction("create-topic", async () => {
       const payload: CreateTopicRequest = { name: topicForm.name };
-      await requestApi(apiBaseUrl, "/api/topics", {
+      await requestSelectedRepoApi("/api/topics", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -880,7 +1105,7 @@ export function App(props: AppProps) {
       }
       setMessage(`Created topic '${payload.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, runAction, topicForm.name]);
+  }, [loadTree, requestSelectedRepoApi, runAction, topicForm.name]);
 
   const handleRenameTopic = useCallback(() => {
     void runAction("rename-topic", async () => {
@@ -894,20 +1119,16 @@ export function App(props: AppProps) {
       }
 
       const payload: RenameTopicRequest = { nextName };
-      const renamedTopic = await requestApi<ContentTopicNode>(
-        apiBaseUrl,
-        `/api/topics/${encodeURIComponent(renameTopicName)}`,
-        {
+      const renamedTopic = await requestSelectedRepoApi<ContentTopicNode>(`/api/topics/${encodeURIComponent(renameTopicName)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        },
-      );
+      });
       setRenameTopicName(renamedTopic.name);
       await loadTree();
       setMessage(`Renamed topic to '${renamedTopic.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, renameTopicName, runAction]);
+  }, [loadTree, renameTopicName, requestSelectedRepoApi, runAction]);
 
   const handleDeleteTopic = useCallback(
     (topicName: string) => {
@@ -917,7 +1138,7 @@ export function App(props: AppProps) {
         }
 
         const payload: DeleteTopicRequest = { name: topicName };
-        await requestApiNoContent(apiBaseUrl, "/api/topics", {
+        await requestSelectedRepoApiNoContent("/api/topics", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -926,7 +1147,7 @@ export function App(props: AppProps) {
         setMessage(`Deleted topic '${topicName}'.`);
       });
     },
-    [apiBaseUrl, loadTree, runAction],
+    [loadTree, requestSelectedRepoApiNoContent, runAction],
   );
 
   const handleDeleteSelectedTopic = useCallback(() => {
@@ -944,7 +1165,7 @@ export function App(props: AppProps) {
         topicName: subtopicForm.topicName,
         name: subtopicForm.name,
       };
-      const createdSubtopic = await requestApi<ContentSubtopicNode>(apiBaseUrl, "/api/subtopics", {
+      const createdSubtopic = await requestSelectedRepoApi<ContentSubtopicNode>("/api/subtopics", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -958,7 +1179,7 @@ export function App(props: AppProps) {
       await loadTree();
       setMessage(`Created subtopic '${createdSubtopic.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, runAction, subtopicForm]);
+  }, [loadTree, requestSelectedRepoApi, runAction, subtopicForm]);
 
   const handleRenameSubtopic = useCallback(() => {
     void runAction("rename-subtopic", async () => {
@@ -979,7 +1200,7 @@ export function App(props: AppProps) {
         currentName: renameSubtopicState.currentName,
         nextName,
       };
-      const renamedSubtopic = await requestApi<ContentSubtopicNode>(apiBaseUrl, "/api/subtopics", {
+      const renamedSubtopic = await requestSelectedRepoApi<ContentSubtopicNode>("/api/subtopics", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -992,7 +1213,7 @@ export function App(props: AppProps) {
       await loadTree();
       setMessage(`Renamed subtopic to '${renamedSubtopic.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, renameSubtopicState, runAction]);
+  }, [loadTree, renameSubtopicState, requestSelectedRepoApi, runAction]);
 
   const handleDeleteSubtopic = useCallback(
     (topicName: string, subtopicName: string) => {
@@ -1005,7 +1226,7 @@ export function App(props: AppProps) {
           topicName,
           name: subtopicName,
         };
-        await requestApiNoContent(apiBaseUrl, "/api/subtopics", {
+        await requestSelectedRepoApiNoContent("/api/subtopics", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1014,7 +1235,7 @@ export function App(props: AppProps) {
         setMessage(`Deleted subtopic '${subtopicName}'.`);
       });
     },
-    [apiBaseUrl, loadTree, runAction],
+    [loadTree, requestSelectedRepoApiNoContent, runAction],
   );
 
   const handleDeleteSelectedSubtopic = useCallback(() => {
@@ -1040,7 +1261,7 @@ export function App(props: AppProps) {
             name: documentForm.name,
             body: documentForm.body,
           };
-      const createdDocument = await requestApi<ContentDocument>(apiBaseUrl, "/api/documents", {
+      const createdDocument = await requestSelectedRepoApi<ContentDocument>("/api/documents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1049,7 +1270,7 @@ export function App(props: AppProps) {
       await loadTree(createdDocument.path);
       setMessage(`Created document '${createdDocument.name}'.`);
     });
-  }, [apiBaseUrl, documentForm, loadTree, runAction]);
+  }, [documentForm, loadTree, requestSelectedRepoApi, runAction]);
 
   const handleSaveDocument = useCallback(() => {
     void runAction("save-document", async () => {
@@ -1061,7 +1282,7 @@ export function App(props: AppProps) {
         path: selectedDocument.path,
         body: selectedDocumentDraft,
       };
-      const updatedDocument = await requestApi<ContentDocument>(apiBaseUrl, "/api/documents", {
+      const updatedDocument = await requestSelectedRepoApi<ContentDocument>("/api/documents", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1072,7 +1293,7 @@ export function App(props: AppProps) {
       await loadTree(updatedDocument.path);
       setMessage(`Saved '${updatedDocument.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, runAction, selectedDocument, selectedDocumentDraft]);
+  }, [loadTree, requestSelectedRepoApi, runAction, selectedDocument, selectedDocumentDraft]);
 
   const handleRenameDocument = useCallback(() => {
     void runAction("rename-document", async () => {
@@ -1084,7 +1305,7 @@ export function App(props: AppProps) {
         path: selectedDocument.path,
         nextName: renameDocumentState.nextName,
       };
-      const renamedDocument = await requestApi<ContentDocument>(apiBaseUrl, "/api/documents/rename", {
+      const renamedDocument = await requestSelectedRepoApi<ContentDocument>("/api/documents/rename", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1096,7 +1317,7 @@ export function App(props: AppProps) {
       await loadTree(renamedDocument.path);
       setMessage(`Renamed document to '${renamedDocument.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, renameDocumentState.nextName, runAction, selectedDocument]);
+  }, [loadTree, renameDocumentState.nextName, requestSelectedRepoApi, runAction, selectedDocument]);
 
   const handleMoveDocument = useCallback(() => {
     void runAction("move-document", async () => {
@@ -1114,7 +1335,7 @@ export function App(props: AppProps) {
             path: selectedDocument.path,
             topicName: moveDocumentState.topicName,
           };
-      const movedDocument = await requestApi<ContentDocument>(apiBaseUrl, "/api/documents/move", {
+      const movedDocument = await requestSelectedRepoApi<ContentDocument>("/api/documents/move", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1125,7 +1346,7 @@ export function App(props: AppProps) {
       await loadTree(movedDocument.path);
       setMessage(`Moved document to '${movedDocument.path}'.`);
     });
-  }, [apiBaseUrl, loadTree, moveDocumentState, runAction, selectedDocument]);
+  }, [loadTree, moveDocumentState, requestSelectedRepoApi, runAction, selectedDocument]);
 
   const handleDeleteDocument = useCallback(() => {
     void runAction("delete-document", async () => {
@@ -1138,7 +1359,7 @@ export function App(props: AppProps) {
       }
 
       const payload: DeleteDocumentRequest = { path: selectedDocument.path };
-      await requestApiNoContent(apiBaseUrl, "/api/documents", {
+      await requestSelectedRepoApiNoContent("/api/documents", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1148,7 +1369,7 @@ export function App(props: AppProps) {
       await loadTree();
       setMessage(`Deleted '${selectedDocument.name}'.`);
     });
-  }, [apiBaseUrl, loadTree, runAction, selectedDocument]);
+  }, [loadTree, requestSelectedRepoApiNoContent, runAction, selectedDocument]);
 
   const handleImportFiles = useCallback(() => {
     void runAction("import-files", async () => {
@@ -1213,7 +1434,7 @@ export function App(props: AppProps) {
               };
       }
 
-      const result = await requestApi<ImportDocumentsResponse>(apiBaseUrl, "/api/import/documents", {
+      const result = await requestSelectedRepoApi<ImportDocumentsResponse>("/api/import/documents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1224,7 +1445,7 @@ export function App(props: AppProps) {
       await loadTree(result.imported[0]?.path ?? selectedDocumentPath);
       setMessage(buildImportSummaryMessage(result));
     });
-  }, [apiBaseUrl, importBundleFile, importFiles, importForm, loadTree, runAction, selectedDocumentPath]);
+  }, [importBundleFile, importFiles, importForm, loadTree, requestSelectedRepoApi, runAction, selectedDocumentPath]);
 
   const handleExportBundle = useCallback(() => {
     void runAction("export-bundle", async () => {
@@ -1281,7 +1502,7 @@ export function App(props: AppProps) {
               format: exportForm.format,
             };
 
-      const exported = await requestApi<ExportDocumentsResponse>(apiBaseUrl, "/api/export", {
+      const exported = await requestSelectedRepoApi<ExportDocumentsResponse>("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -1296,14 +1517,7 @@ export function App(props: AppProps) {
       const documentCount = exported.format === "bundle-json" ? exported.documents.length : exported.documentCount;
       setMessage(`Exported ${documentCount} document${documentCount === 1 ? "" : "s"} as ${exported.format}.`);
     });
-  }, [apiBaseUrl, exportForm, runAction, selectedDocument]);
-
-  const handleRefreshSync = useCallback(() => {
-    void runAction("refresh-sync", async () => {
-      await loadSyncStatus(true);
-      setMessage("Refreshed git sync status.");
-    });
-  }, [loadSyncStatus, runAction]);
+  }, [exportForm, requestSelectedRepoApi, runAction, selectedDocument]);
 
   const handleRevealTopNotices = useCallback(() => {
     if (typeof window === "undefined") {
@@ -1320,6 +1534,23 @@ export function App(props: AppProps) {
     });
   }, []);
 
+  const resetRepoBoundState = useCallback(() => {
+    setTree(null);
+    setSelectedDocumentPath(null);
+    setSelectedDocument(null);
+    setSelectedDocumentDraft("");
+    setSearchResponse(null);
+    setSyncStatus(null);
+    setSyncError(null);
+  }, []);
+
+  const handleRefreshSync = useCallback(() => {
+    void runAction("refresh-sync", async () => {
+      await loadSyncStatus(true);
+      setMessage("Refreshed git sync status.");
+    });
+  }, [loadSyncStatus, runAction]);
+
   const handleSyncPull = useCallback(() => {
     void runAction("sync-pull", async () => {
       if (!syncStatus) {
@@ -1330,18 +1561,21 @@ export function App(props: AppProps) {
         throw new Error(syncStatus.pullBlockers[0] ?? "Sync pull is currently blocked.");
       }
 
-      if (!window.confirm(`Pull remote content into '${syncStatus.currentBranch}' from ${syncStatus.remoteName}?`)) {
+      const remoteTargetLabel = syncStatus.remoteUrl
+        ? `${syncStatus.remoteName} (${syncStatus.remoteUrl})`
+        : syncStatus.remoteName;
+      if (!window.confirm(`Pull remote content into '${syncStatus.currentBranch}' from ${remoteTargetLabel}?`)) {
         return;
       }
 
-      const result = await requestApi<GitSyncOperationResponse>(apiBaseUrl, "/api/sync/pull", {
+      const result = await requestSelectedRepoApi<GitSyncOperationResponse>("/api/sync/pull", {
         method: "POST",
       });
       setSyncStatus(result.status);
       await loadTree(selectedDocumentPath);
       setMessage(result.summary);
     });
-  }, [apiBaseUrl, loadTree, runAction, selectedDocumentPath, syncStatus]);
+  }, [loadTree, requestSelectedRepoApi, runAction, selectedDocumentPath, syncStatus]);
 
   const handleSyncPush = useCallback(() => {
     void runAction("sync-push", async () => {
@@ -1358,12 +1592,15 @@ export function App(props: AppProps) {
         throw new Error("Enter a sync commit message before pushing.");
       }
 
-      if (!window.confirm(`Commit content changes and push '${syncStatus.currentBranch}' to ${syncStatus.remoteName}?`)) {
+      const remoteTargetLabel = syncStatus.remoteUrl
+        ? `${syncStatus.remoteName} (${syncStatus.remoteUrl})`
+        : syncStatus.remoteName;
+      if (!window.confirm(`Commit content changes and push '${syncStatus.currentBranch}' to ${remoteTargetLabel}?`)) {
         return;
       }
 
       try {
-        const result = await requestApi<GitSyncOperationResponse>(apiBaseUrl, "/api/sync/push", {
+        const result = await requestSelectedRepoApi<GitSyncOperationResponse>("/api/sync/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: commitMessage }),
@@ -1375,7 +1612,7 @@ export function App(props: AppProps) {
         handleRevealTopNotices();
       }
     });
-  }, [apiBaseUrl, handleRevealTopNotices, runAction, syncPushMessage, syncStatus]);
+  }, [handleRevealTopNotices, requestSelectedRepoApi, runAction, syncPushMessage, syncStatus]);
 
   const handleConfigureSyncSchedule = useCallback(() => {
     void runAction("sync-schedule-configure", async () => {
@@ -1384,7 +1621,7 @@ export function App(props: AppProps) {
         throw new Error("Background sync interval must be a whole number of minutes between 1 and 1440.");
       }
 
-      const result = await requestApi<GitSyncScheduleResponse>(apiBaseUrl, "/api/sync/schedule", {
+      const result = await requestSelectedRepoApi<GitSyncScheduleResponse>("/api/sync/schedule", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1395,27 +1632,190 @@ export function App(props: AppProps) {
       setSyncStatus(result.status);
       setMessage(result.summary);
     });
-  }, [apiBaseUrl, runAction, syncScheduleForm.enabled, syncScheduleForm.intervalMinutes]);
+  }, [requestSelectedRepoApi, runAction, syncScheduleForm.enabled, syncScheduleForm.intervalMinutes]);
 
   const handlePauseSyncSchedule = useCallback(() => {
     void runAction("sync-schedule-pause", async () => {
-      const result = await requestApi<GitSyncScheduleResponse>(apiBaseUrl, "/api/sync/schedule/pause", {
+      const result = await requestSelectedRepoApi<GitSyncScheduleResponse>("/api/sync/schedule/pause", {
         method: "POST",
       });
       setSyncStatus(result.status);
       setMessage(result.summary);
     });
-  }, [apiBaseUrl, runAction]);
+  }, [requestSelectedRepoApi, runAction]);
 
   const handleResumeSyncSchedule = useCallback(() => {
     void runAction("sync-schedule-resume", async () => {
-      const result = await requestApi<GitSyncScheduleResponse>(apiBaseUrl, "/api/sync/schedule/resume", {
+      const result = await requestSelectedRepoApi<GitSyncScheduleResponse>("/api/sync/schedule/resume", {
         method: "POST",
       });
       setSyncStatus(result.status);
       setMessage(result.summary);
     });
-  }, [apiBaseUrl, runAction]);
+  }, [requestSelectedRepoApi, runAction]);
+
+  const validateLibraryRepo = useCallback(
+    async (repo: SavedLibraryRepoDefinition) =>
+      requestApi<LibraryRepoTestResponse>(
+        apiBaseUrl,
+        "/api/library/test",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo: toLibraryRepoDefinition(repo) }),
+        },
+      ),
+    [apiBaseUrl],
+  );
+
+  const handleSelectRepo = useCallback(
+    (nextRepoId: string) => {
+      void runAction("select-library-repo", async () => {
+        if (nextRepoId === selectedRepoId) {
+          return;
+        }
+
+        const nextRepo = libraryEntries.find((entry) => entry.id === nextRepoId);
+        if (!nextRepo) {
+          setError("Choose a saved repository before switching to it.");
+          return;
+        }
+
+        setError(null);
+        resetRepoBoundState();
+        setSelectedRepoId(nextRepo.id);
+        setLibraryTestResult(null);
+        setMessage(`Switched to '${nextRepo.name}'.`);
+      });
+    },
+    [libraryEntries, resetRepoBoundState, runAction, selectedRepoId],
+  );
+
+  const handleSaveLibraryRepo = useCallback(() => {
+    void runAction("save-library-repo", async () => {
+      const repo = buildLibraryRepoDefinitionFromForm(libraryRepoForm);
+      const result = await validateLibraryRepo(repo);
+      const validatedRepo = applyRepoSummaryToSavedRepo(repo, result.repo);
+      if (validatedRepo.id === selectedRepoId) {
+        resetRepoBoundState();
+      }
+      setLibraryEntries((current) => upsertLibraryRepo(current, validatedRepo));
+      setLibraryRepoForm(createEmptyLibraryRepoFormState());
+      setLibraryTestResult(result);
+      setMessage(`${libraryRepoForm.id ? "Updated" : "Saved"} repository '${validatedRepo.name}'.`);
+    });
+  }, [libraryRepoForm, resetRepoBoundState, runAction, selectedRepoId, validateLibraryRepo]);
+
+  const handleTestLibraryRepo = useCallback(() => {
+    void runAction("test-library-repo", async () => {
+      const repo = buildLibraryRepoDefinitionFromForm(libraryRepoForm);
+      const result = await validateLibraryRepo(repo);
+      const validatedRepo = applyRepoSummaryToSavedRepo(repo, result.repo);
+      setLibraryRepoForm({
+        id: validatedRepo.id,
+        source: validatedRepo.source ?? "saved",
+        name: validatedRepo.name,
+        repoRoot: validatedRepo.repoRoot,
+        dataRoot: validatedRepo.dataRoot ?? "",
+        releaseBranch: validatedRepo.releaseBranch ?? "",
+      });
+      setLibraryTestResult(result);
+      setMessage(`Validated repository '${validatedRepo.name}'.`);
+    });
+  }, [libraryRepoForm, runAction, validateLibraryRepo]);
+
+  const handleEditLibraryRepo = useCallback((repo: SavedLibraryRepoDefinition) => {
+    setLibraryRepoForm({
+      id: repo.id,
+      source: isConfiguredLibraryRepo(repo) ? "configured" : "saved",
+      name: repo.name,
+      repoRoot: repo.repoRoot,
+      dataRoot: repo.dataRoot ?? "",
+      releaseBranch: repo.releaseBranch ?? "",
+    });
+    setLibraryTestResult(null);
+    revealLibraryEditPane();
+  }, [revealLibraryEditPane]);
+
+  const handleCancelLibraryEdit = useCallback(() => {
+    setLibraryRepoForm(createEmptyLibraryRepoFormState());
+    setLibraryTestResult(null);
+  }, []);
+
+  const handleRemoveLibraryRepo = useCallback(
+    (repoId: string) => {
+      const repo = libraryEntries.find((entry) => entry.id === repoId);
+      if (!repo) {
+        setError("Choose a saved repository before removing it.");
+        return;
+      }
+
+      if (isConfiguredLibraryRepo(repo)) {
+        setError("The configured repository is managed by this Dacci runtime and cannot be removed.");
+        return;
+      }
+
+      if (!window.confirm(`Remove saved repository '${repo.name}' from this browser?`)) {
+        return;
+      }
+
+      setLibraryEntries((current) => current.filter((entry) => entry.id !== repoId));
+      setLibraryTestResult((current) => (current?.repo.id === repoId ? null : current));
+      setLibraryRepoForm((current) => (current.id === repoId ? createEmptyLibraryRepoFormState() : current));
+      if (selectedRepoId === repoId) {
+        resetRepoBoundState();
+        setSelectedRepoId(configuredRepoId);
+        setMessage(`Removed '${repo.name}' and switched to the configured repository.`);
+        return;
+      }
+
+      setMessage(`Removed saved repository '${repo.name}'.`);
+    },
+    [libraryEntries, resetRepoBoundState, selectedRepoId],
+  );
+
+  const handleExportLibrary = useCallback(() => {
+    if (libraryEntries.length === 0) {
+      setError("There are no saved repositories to export.");
+      return;
+    }
+
+    downloadFile(JSON.stringify(libraryEntries, null, 2), "dacci-library-repos.json", "application/json");
+    setError(null);
+    setMessage(`Exported ${libraryEntries.length} saved repositor${libraryEntries.length === 1 ? "y" : "ies"}.`);
+  }, [libraryEntries]);
+
+  const handleImportLibrary = useCallback(
+    (file: File | null) => {
+      if (!file) {
+        return;
+      }
+
+      void runAction("import-library", async () => {
+        const importedEntries = parseImportedLibraryEntries(await file.text());
+        if (
+          libraryEntries.length > 0 &&
+          !window.confirm("Replace the current saved repository list with the imported one?")
+        ) {
+          return;
+        }
+
+        const nextState = reconcileLibraryState(importedEntries, selectedRepoId, configuredLibraryRepo);
+        setLibraryEntries(nextState.entries);
+        setSelectedRepoId(nextState.lastViewedRepoId);
+        if (
+          !importedEntries.some((entry) => entry.id === selectedRepoId)
+        ) {
+          resetRepoBoundState();
+        }
+        setLibraryRepoForm(createEmptyLibraryRepoFormState());
+        setLibraryTestResult(null);
+        setLibraryImportInputKey((current) => current + 1);
+        setMessage(`Imported ${importedEntries.length} saved repositor${importedEntries.length === 1 ? "y" : "ies"}.`);
+      });
+    },
+    [configuredLibraryRepo, libraryEntries, resetRepoBoundState, runAction, selectedRepoId],
+  );
 
   const handleToggleMode = useCallback(() => {
     setDocumentMode((current) => (current === "view" ? "edit" : "view"));
@@ -1555,6 +1955,13 @@ export function App(props: AppProps) {
   }, [apiBaseUrl, navigationPaneOpen, openSidePanel, showDocuments, showTags, showHidden, outlineOpen]);
 
   useEffect(() => {
+    writePersistedLibraryState(apiBaseUrl, {
+      entries: libraryEntries,
+      lastViewedRepoId: selectedRepoId,
+    });
+  }, [apiBaseUrl, libraryEntries, selectedRepoId]);
+
+  useEffect(() => {
     if (!selectedDocumentHasFrontMatter && showHidden) {
       setShowHidden(false);
     }
@@ -1604,49 +2011,89 @@ export function App(props: AppProps) {
     });
   }, [navigationPaneOpen]);
 
+  useEffect(() => {
+    const previousOutlineOpen = previousOutlineOpenRef.current;
+    if (previousOutlineOpen === outlineOpen) {
+      return;
+    }
+
+    previousOutlineOpenRef.current = outlineOpen;
+
+    if (!outlineOpen || !showDocumentOutline || typeof window === "undefined") {
+      return;
+    }
+
+    const targetElement = window.matchMedia("(max-width: 1100px)").matches
+      ? externalOutlineRef.current ?? viewerPanelRef.current
+      : viewerPanelRef.current;
+    if (!targetElement) {
+      return;
+    }
+
+    scrollPaneSectionIntoView(null, targetElement);
+  }, [outlineOpen, scrollPaneSectionIntoView, showDocumentOutline]);
+
   return (
     <main className="app-shell">
       <section className="hero-card" ref={heroCardRef}>
         <div className="hero-card-header">
-          <h1>Dacci</h1>
-          <div className="hero-toggle-group">
-            <button
-              aria-pressed={navigationPaneOpen}
-              className={navigationPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
-              onClick={() => setNavigationPaneOpen((current) => !current)}
-              type="button"
-            >
-              Navigation
-            </button>
-            <button
-              aria-pressed={managementPaneOpen}
-              className={managementPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
-              onClick={handleToggleManagementPane}
-              type="button"
-            >
-              Manage
-            </button>
-            <button
-              aria-pressed={libraryPaneOpen}
-              className={libraryPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
-              onClick={handleToggleLibraryPane}
-              type="button"
-            >
-              Library
-            </button>
-            <button
-              aria-pressed={syncPaneOpen}
-              className={syncPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
-              onClick={handleToggleSyncPane}
-              type="button"
-            >
-              Sync
-            </button>
+          <div className="hero-copy">
+            <h1>Dacci</h1>
+            <p className="tagline">
+              Docs as Code. Context Included.
+            </p>
+            <div className="sync-chip-row hero-status-row">
+              <span className="metadata-pill success">Active repo {activeRepoLabel}</span>
+              {selectedLibraryRepo ? <span className="metadata-pill">{selectedLibraryRepo.repoRoot}</span> : null}
+            </div>
+          </div>
+          <div className="hero-header-actions">
+            <label className="hero-repo-selector">
+              <span>Repository</span>
+              <select disabled={busy} onChange={(event) => handleSelectRepo(event.target.value)} value={selectedRepoId}>
+                {libraryEntries.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="hero-toggle-group">
+              <button
+                aria-pressed={navigationPaneOpen}
+                className={navigationPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+                onClick={() => setNavigationPaneOpen((current) => !current)}
+                type="button"
+              >
+                Navigation
+              </button>
+              <button
+                aria-pressed={managementPaneOpen}
+                className={managementPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+                onClick={handleToggleManagementPane}
+                type="button"
+              >
+                Manage
+              </button>
+              <button
+                aria-pressed={libraryPaneOpen}
+                className={libraryPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+                onClick={handleToggleLibraryPane}
+                type="button"
+              >
+                Library
+              </button>
+              <button
+                aria-pressed={syncPaneOpen}
+                className={syncPaneOpen ? "toggle-button tone-bright" : "toggle-button tone-neutral"}
+                onClick={handleToggleSyncPane}
+                type="button"
+              >
+                Sync
+              </button>
+            </div>
           </div>
         </div>
-        <p className="tagline">
-          Docs as Code. Context Included.
-        </p>
       </section>
 
       {error ? <p className="notice error">{error}</p> : null}
@@ -1665,6 +2112,7 @@ export function App(props: AppProps) {
             selectedDocumentPath={selectedDocumentPath}
             showDocuments={showDocuments}
             topics={topicOptions}
+            onClose={() => setNavigationPaneOpen(false)}
             onCollapseAll={handleCollapseAllTreeNodes}
             onSearchQueryChange={setSearchQuery}
             onSelectDocument={setSelectedDocumentPath}
@@ -1675,7 +2123,13 @@ export function App(props: AppProps) {
         ) : null}
 
         {showExternalOutline ? (
-          <DocumentOutlinePane className="document-outline-panel" headings={selectedDocumentHeadings} />
+          <DocumentOutlinePane
+            className="document-outline-panel"
+            closeLabel="Close outline panel"
+            headings={selectedDocumentHeadings}
+            onClose={() => setOutlineOpen(false)}
+            panelRef={externalOutlineRef}
+          />
         ) : null}
 
         <section className="panel viewer-panel" ref={viewerPanelRef}>
@@ -1819,9 +2273,9 @@ export function App(props: AppProps) {
                   </div>
                 ) : null}
                 {documentMode === "view" ? (
-                  <div className={showDocumentOutline ? "document-reader-layout with-outline" : "document-reader-layout"}>
+                  <div className={showInlineOutline ? "document-reader-layout with-outline" : "document-reader-layout"}>
                     <MarkdownViewer markdown={selectedDocumentDraft} showFrontMatter={showHidden} />
-                    {showDocumentOutline ? (
+                    {showInlineOutline ? (
                       <DocumentOutlinePane className="inline-outline-panel" headings={selectedDocumentHeadings} />
                     ) : null}
                   </div>
@@ -1979,11 +2433,58 @@ export function App(props: AppProps) {
               />
             ) : null}
 
-            {libraryPaneOpen ? <LibraryPane onToggleOpen={handleToggleLibraryPane} /> : null}
+            {libraryPaneOpen ? (
+              <LibraryPane
+                activeRepoLabel={activeRepoLabel}
+                busy={busy}
+                createContentRepoGuideUrl={createContentRepoGuideUrl}
+                editSectionRef={libraryEditSectionRef}
+                scrollContainerRef={libraryPaneScrollRef}
+                form={libraryRepoForm}
+                importInputKey={libraryImportInputKey}
+                savedRepos={libraryEntries}
+                selectedRepoId={selectedRepoId}
+                testResult={libraryTestResult}
+                onCancelEdit={handleCancelLibraryEdit}
+                onEditRepo={handleEditLibraryRepo}
+                onExportLibrary={handleExportLibrary}
+                onFormDataRootChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    dataRoot: value,
+                  }))
+                }
+                onFormNameChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    name: value,
+                  }))
+                }
+                onFormReleaseBranchChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    releaseBranch: value,
+                  }))
+                }
+                onFormRepoRootChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    repoRoot: value,
+                  }))
+                }
+                onImportLibrary={handleImportLibrary}
+                onRemoveRepo={handleRemoveLibraryRepo}
+                onSaveRepo={handleSaveLibraryRepo}
+                onSelectRepo={handleSelectRepo}
+                onTestRepo={handleTestLibraryRepo}
+                onToggleOpen={handleToggleLibraryPane}
+              />
+            ) : null}
 
             {syncPaneOpen ? (
               <SyncPane
                 busy={busy}
+                scrollContainerRef={syncPaneScrollRef}
                 selectedDocumentChanged={selectedDocumentHasPendingSync}
                 syncError={syncError}
                 syncPushMessage={syncPushMessage}
@@ -2091,4 +2592,173 @@ function buildSelectedDocumentRepoPaths(document: ContentDocument, contentPath: 
 
 function normalizeRepoPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+/g, "/");
+}
+
+function buildLibraryRepoDefinitionFromForm(form: LibraryRepoFormState): SavedLibraryRepoDefinition {
+  const name = form.name.trim();
+  if (!name) {
+    throw new Error("Repository name is required.");
+  }
+
+  const repoRoot = form.repoRoot.trim();
+  if (!repoRoot) {
+    throw new Error("Repository root is required.");
+  }
+
+  if (!looksLikeAbsolutePath(repoRoot)) {
+    throw new Error("Repository root must be an absolute path.");
+  }
+
+  const dataRoot = form.dataRoot.trim();
+  if (dataRoot && !looksLikeAbsolutePath(dataRoot)) {
+    throw new Error("Content root override must be an absolute path.");
+  }
+  const releaseBranch = form.releaseBranch.trim();
+
+  const source = form.source ?? "saved";
+  const baseRepo: SavedLibraryRepoDefinition = {
+    id: form.id ?? createLibraryRepoId(),
+    source,
+    name,
+    repoRoot,
+  };
+
+  if (dataRoot) {
+    baseRepo.dataRoot = dataRoot;
+  }
+  if (releaseBranch) {
+    baseRepo.releaseBranch = releaseBranch;
+  }
+
+  return baseRepo;
+}
+
+function upsertLibraryRepo(
+  entries: SavedLibraryRepoDefinition[],
+  repo: SavedLibraryRepoDefinition,
+): SavedLibraryRepoDefinition[] {
+  const remainingEntries = entries.filter(
+    (entry) => entry.id !== repo.id && !(isConfiguredLibraryRepo(entry) && isConfiguredLibraryRepo(repo)),
+  );
+  return [...remainingEntries, repo].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function parseImportedLibraryEntries(rawValue: string): SavedLibraryRepoDefinition[] {
+  let parsedValue: unknown;
+  try {
+    parsedValue = JSON.parse(rawValue);
+  } catch {
+    throw new Error("Library import file is not valid JSON.");
+  }
+
+  const sourceEntries =
+    Array.isArray(parsedValue)
+      ? parsedValue
+      : parsedValue && typeof parsedValue === "object" && Array.isArray((parsedValue as { entries?: unknown }).entries)
+        ? (parsedValue as { entries: unknown[] }).entries
+        : null;
+  if (!sourceEntries) {
+    throw new Error("Library import must be a JSON array of repository definitions.");
+  }
+
+  const importedEntries = sourceEntries.map((entry) => parseImportedLibraryRepo(entry));
+  const seenIds = new Set<string>();
+  for (const entry of importedEntries) {
+    if (seenIds.has(entry.id)) {
+      throw new Error(`Library import contains a duplicate repository id: ${entry.id}`);
+    }
+    seenIds.add(entry.id);
+  }
+
+  return importedEntries.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function parseImportedLibraryRepo(value: unknown): SavedLibraryRepoDefinition {
+  if (!value || typeof value !== "object") {
+    throw new Error("Each imported repository must be an object.");
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+  const repoRoot = typeof candidate.repoRoot === "string" ? candidate.repoRoot.trim() : "";
+  if (!name) {
+    throw new Error("Each imported repository requires a name.");
+  }
+  if (!repoRoot) {
+    throw new Error(`Imported repository '${name}' is missing its repository root.`);
+  }
+
+  const id = typeof candidate.id === "string" && candidate.id.trim() ? candidate.id.trim() : createLibraryRepoId();
+  const dataRoot = typeof candidate.dataRoot === "string" ? candidate.dataRoot.trim() : "";
+  const source = candidate.source === "configured" || candidate.source === "saved" ? candidate.source : "saved";
+  const releaseBranch = typeof candidate.releaseBranch === "string" ? candidate.releaseBranch.trim() : "";
+
+  const repo: SavedLibraryRepoDefinition = {
+    id,
+    source,
+    name,
+    repoRoot,
+  };
+  if (dataRoot) {
+    repo.dataRoot = dataRoot;
+  }
+  if (releaseBranch) {
+    repo.releaseBranch = releaseBranch;
+  }
+
+  return repo;
+}
+
+function applyRepoSummaryToSavedRepo(
+  repo: SavedLibraryRepoDefinition,
+  summary: RepoContextSummary,
+): SavedLibraryRepoDefinition {
+  const preservedName = summary.isDefault ? summary.name : repo.name.trim() || summary.name;
+  const nextRepo: SavedLibraryRepoDefinition = {
+    id: repo.id,
+    source: summary.isDefault ? "configured" : (repo.source ?? "saved"),
+    name: preservedName,
+    repoRoot: summary.repoRoot,
+  };
+
+  if (summary.dataRoot) {
+    nextRepo.dataRoot = summary.dataRoot;
+  }
+  if (summary.isDefault && summary.releaseBranch) {
+    nextRepo.releaseBranch = summary.releaseBranch;
+  } else if (repo.releaseBranch) {
+    nextRepo.releaseBranch = repo.releaseBranch;
+  }
+
+  return nextRepo;
+}
+
+function savedLibraryRepoEquals(left: SavedLibraryRepoDefinition, right: SavedLibraryRepoDefinition): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    left.repoRoot === right.repoRoot &&
+    (left.dataRoot ?? "") === (right.dataRoot ?? "") &&
+    (left.releaseBranch ?? "") === (right.releaseBranch ?? "") &&
+    (left.source ?? "") === (right.source ?? "")
+  );
+}
+
+function savedLibraryRepoListEquals(
+  left: SavedLibraryRepoDefinition[],
+  right: SavedLibraryRepoDefinition[],
+): boolean {
+  return left.length === right.length && left.every((entry, index) => savedLibraryRepoEquals(entry, right[index]!));
+}
+
+function createLibraryRepoId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `repo-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function looksLikeAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }

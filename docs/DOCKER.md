@@ -1,107 +1,90 @@
 # Docker deployment
 
-This guide explains what to run to package and start Dacci on a single host with Docker Compose.
+This guide explains how to run Dacci as a localhost-only Docker Compose app on one machine.
 
 ## Runtime summary
 
 | Item | Value |
 | --- | --- |
-| API port | `3000` |
-| Web port | `4173` |
-| Mounted content repo path in container | `/workspace` |
-| Content path in container | `/workspace/data` |
-| Git sync root in container | `/workspace` |
-| Optional Git credential mount | `/var/run/dacci-git` |
-| Expected Git credential files | `id_ed25519`, `known_hosts` |
+| API host port | `127.0.0.1:3000` |
+| Web host port | `127.0.0.1:4173` |
+| Mounted workspace root in container | `/workspace` |
+| Configured content repo path in container | `/workspace/<repo-name>` |
+| Content path in container | `/workspace/<repo-name>/data` |
+| Git sync root in container | `/workspace/<repo-name>` |
+| Default custom library root allowlist | `/workspace` |
+| Host SSH directory mount | `/root/.ssh` |
+| Optional forwarded SSH agent | host `SSH_AUTH_SOCK`, mounted at the same path when present |
 
-The packaged runtime expects a real Git-backed content checkout, not just a copy of the `data/` directory.
+The packaged runtime expects a real Git-backed content checkout, not just a copy of `data/`.
 
 ## Prerequisites
 
 - Docker Engine
 - Docker Compose v2
 - a local clone of this repository
+- a local clone of `E2Open.KPE.Content`
+- working SSH Git access from the host shell for the content repo remote
+
+Recommended local layout:
+
+```text
+workspace/
+├── dacci
+└── E2Open.KPE.Content
+```
 
 ## Start and stop
 
-From the repository root:
-
-```bash
-npm run docker:config
-docker compose -f deploy/docker/compose.yaml up --build -d
-```
-
-Convenience wrappers are also available from the repository root:
+From the Dacci repository root:
 
 ```bash
 ./scripts/up
 ./scripts/down
 ```
 
-`./scripts/up` starts the Compose stack in detached mode, sets `DACCI_GIT_SSH_DIR="$HOME/.ssh"` by default, and targets a sibling `../E2Open.KPE.Content` checkout. If your content checkout lives elsewhere, set `DACCI_CONTENT_ROOT` explicitly before starting the stack.
+`./scripts/up`:
 
-Stop the stack:
+- starts the stack in detached mode
+- defaults `DACCI_CONTENT_ROOT` to a sibling `../E2Open.KPE.Content` checkout
+- mounts the parent workspace directory at `/workspace` so sibling Library repos are available at `/workspace/<repo-name>`
+- mounts `"$HOME/.ssh"` into the API container at `/root/.ssh` unless you override `DACCI_HOST_SSH_DIR`
+- forwards `SSH_AUTH_SOCK` into the API container when it is set in the shell that launches the stack
+- publishes the API and web ports on `127.0.0.1` only
+
+You can still inspect the resolved Compose file directly:
 
 ```bash
-docker compose -f deploy/docker/compose.yaml down
+npm run docker:config
 ```
+
+If you prefer to start Compose manually instead of using `./scripts/up`, set the same environment variables yourself first.
 
 ## What gets mounted
 
-`deploy/docker/compose.yaml` mounts the content repository checkout into `/workspace` and then binds the host `data/` path again onto `/workspace/data`.
-
-What that means:
+`deploy/docker/compose.yaml` mounts the parent workspace into `/workspace`, keeps the configured content checkout rooted at `/workspace/<repo-name>`, and binds the host `data/` path again onto `/workspace/<repo-name>/data`.
 
 | Concern | Behavior |
 | --- | --- |
 | Relative host path | Defaults to a sibling `../E2Open.KPE.Content` checkout unless `DACCI_CONTENT_ROOT` is set |
-| Content location | Host `data/` is explicitly bound onto `/workspace/data` |
+| Content location | Host `data/` is explicitly bound onto `/workspace/<repo-name>/data` |
+| Library repo location | Host workspace root is bound onto `/workspace` unless `DACCI_LIBRARY_WORKSPACE_ROOT` is set |
 | Git metadata | Comes from the mounted content repository `.git` directory |
-| Git auth | Optional SSH credential bind mount at `/var/run/dacci-git` |
+| Git access | Uses the mounted host `~/.ssh` config and any forwarded `ssh-agent` socket |
 | Scheduler state | Persists with the mounted content repository because it is repo-local |
-
-The application code itself runs from the built image. The only runtime bind mount the API needs is the Git-backed content checkout plus the optional SSH credential directory.
 
 That explicit `data/` bind still matters when the host content checkout uses a symlink for `data/`. Docker preserves symlinks inside a parent-directory mount, but a direct bind of the `data/` path lets the host resolve a target such as `/mnt/c/...` before the container sees it.
 
-## Basic configuration override
+## Alternate content and library roots
 
-Use a compose override file for local customization:
-
-```yaml
-services:
-  api:
-    ports:
-      - "8080:3000"
-    environment:
-      GIT_SYNC_REMOTE_NAME: origin
-      GIT_SYNC_RELEASE_BRANCH: main
-  web:
-    ports:
-      - "8081:4173"
-    environment:
-      WEB_API_BASE_URL: http://localhost:8080
-```
-
-Start with both files:
-
-```bash
-docker compose \
-  -f deploy/docker/compose.yaml \
-  -f deploy/docker/compose.override.yaml \
-  up --build -d
-```
-
-## Alternate host storage
-
-If you want the runtime content checkout somewhere other than the repository checkout, point `DACCI_CONTENT_ROOT` at it:
+If your content repo is not cloned beside Dacci, point `DACCI_CONTENT_ROOT` at it:
 
 ```bash
 DACCI_CONTENT_ROOT=/srv/E2Open.KPE.Content \
-docker compose -f deploy/docker/compose.yaml up --build -d
+./scripts/up
 ```
 
-Because the Compose file derives both `/workspace` and `/workspace/data` from the same variable, the alternate host path still needs this structure:
+That alternate content repo still needs this structure:
 
 ```text
 /srv/E2Open.KPE.Content
@@ -109,91 +92,79 @@ Because the Compose file derives both `/workspace` and `/workspace/data` from th
   /data
 ```
 
-## Git credentials
-
-The packaged Docker runtime now follows the same basic pattern as Kubernetes: the API container always has one stable in-container SSH credential path at `/var/run/dacci-git`, and operators supply key material from the host.
-
-| Item | Expected value |
-| --- | --- |
-| Mount path | `/var/run/dacci-git` |
-| Files | `id_ed25519`, `known_hosts` |
-| Remote override | `GIT_SYNC_REMOTE_URL=git@github.com:example/E2Open.KPE.Content.git` |
-| Git wiring | `GIT_SSH_COMMAND=ssh -i /var/run/dacci-git/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/run/dacci-git/known_hosts` |
-
-The checked-in Compose file mounts a host directory into that path:
-
-```yaml
-services:
-  api:
-    volumes:
-      - type: bind
-        source: ${DACCI_GIT_SSH_DIR:-./git-ssh}
-        target: /var/run/dacci-git
-        read_only: true
-```
-
-By default, `./git-ssh` resolves to `deploy/docker/git-ssh/`. That directory is present in the repo only as a `.gitignore` scaffold so you can place local SSH files there without committing them. If you prefer to keep credentials entirely outside the repository checkout, set `DACCI_GIT_SSH_DIR` to another host directory before running Compose.
-
-The checked-in Compose file does not hardcode `GIT_SYNC_REMOTE_URL`. Set it only when the content checkout should sync against an SSH remote that differs from the saved repository config.
-
-Example host files:
-
-`id_ed25519`:
-
-```text
------BEGIN OPENSSH PRIVATE KEY-----
-...
------END OPENSSH PRIVATE KEY-----
-```
-
-`known_hosts`:
-
-```text
-github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
-```
-
-Example startup with an external credential directory:
-
-```bash
-DACCI_CONTENT_ROOT=../E2Open.KPE.Content \
-DACCI_GIT_SSH_DIR="$HOME/.config/dacci/docker-git-ssh" \
-docker compose -f deploy/docker/compose.yaml up --build -d
-```
-
-Example startup with an alternate content root:
+If you also want sibling custom Library repos from that alternate location, point `DACCI_LIBRARY_WORKSPACE_ROOT` at the parent directory that contains those checkouts:
 
 ```bash
 DACCI_CONTENT_ROOT=/srv/E2Open.KPE.Content \
-docker compose -f deploy/docker/compose.yaml up --build -d
+DACCI_LIBRARY_WORKSPACE_ROOT=/srv \
+./scripts/up
 ```
 
-If you want the checked-in Docker stack to use the SSH files from your normal `~/.ssh` directory, the shortcut script already does that:
+If you want to use an SSH directory other than the default `"$HOME/.ssh"`, override it explicitly:
+
+```bash
+DACCI_HOST_SSH_DIR="$HOME/.config/dacci/ssh" \
+./scripts/up
+```
+
+## Library repo paths inside Docker
+
+When you run Dacci in Docker, custom Library entries must use the in-container path, not the host path you see in your shell.
+
+Example:
+
+- Host repo path: `/home/mkronvold/src/Dacci.Example.Content`
+- Docker Library entry repo root: `/workspace/Dacci.Example.Content`
+- Data root: leave blank
+
+With the default sibling layout, `./scripts/up` mounts `/home/mkronvold/src` into the API container at `/workspace`, so the example repo is immediately usable after restarting the stack.
+
+## Git access
+
+This branch no longer uses GitHub OAuth, browser-stored GitHub usernames, or request-scoped SSH key selection.
+
+Instead:
+
+- keep your content repo remote as a normal SSH remote such as `git@github.com:owner/E2Open.KPE.Content.git`
+- make sure `git -C ../E2Open.KPE.Content fetch origin` already works from the host shell
+- start Dacci from a shell where `SSH_AUTH_SOCK` is set if your keys depend on an agent
+- let the API container reuse that mounted SSH config and agent socket
+
+The browser never uploads SSH keys or holds Git credentials.
+
+The checked-in Compose file does not hardcode `GIT_SYNC_REMOTE_URL`. Set it only when the content checkout should sync against a remote URL that differs from the repository's saved remote config.
+
+Example startup with the default sibling content repo:
 
 ```bash
 ./scripts/up
 ```
 
-If you prefer to override it explicitly:
+Example startup with an explicit content repo and SSH directory:
 
 ```bash
-GIT_SYNC_REMOTE_URL=git@github.com:example/E2Open.KPE.Content.git \
+DACCI_CONTENT_ROOT=/srv/E2Open.KPE.Content \
+DACCI_HOST_SSH_DIR="$HOME/.ssh" \
 ./scripts/up
 ```
 
 ## Verification
 
+Once the stack is up:
+
 ```bash
-curl http://localhost:3000/health
-curl http://localhost:3000/ready
-curl http://localhost:4173/health
-curl http://localhost:4173/runtime-config.json
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/ready
+curl http://127.0.0.1:4173/health
+curl http://127.0.0.1:4173/runtime-config.json
 ```
 
 ## Troubleshooting
 
 | Problem | Check |
 | --- | --- |
-| Web cannot reach API | `WEB_API_BASE_URL` |
-| Documents are missing | host content checkout contents, `DACCI_CONTENT_ROOT`, and `/workspace/data` |
-| Sync fails or `/ready` fails | mounted content checkout includes `.git`, `/var/run/dacci-git` contains `id_ed25519` and `known_hosts`, and `GIT_SYNC_REMOTE_URL` points at an SSH URL with repo access |
+| Web cannot reach API | `WEB_API_BASE_URL`, container health, and that you opened the UI on `127.0.0.1:4173` or `localhost:4173` |
+| Documents are missing | host content checkout contents, `DACCI_CONTENT_ROOT`, and `/workspace/<repo-name>/data` |
+| Sync fails or `/ready` fails | verify the mounted content checkout includes `.git`, the repo remote uses SSH, the host `~/.ssh` config already works for that remote, and `SSH_AUTH_SOCK` was set before `./scripts/up` if your keys need an agent |
+| Custom Library repos say they are unavailable | restart with the updated stack, check `DACCI_LIBRARY_WORKSPACE_ROOT` / `DACCI_LIBRARY_ROOTS`, and use the in-container repo path such as `/workspace/Dacci.Example.Content` |
 | Path mapping looks wrong | remember relative paths are resolved from the compose file location |

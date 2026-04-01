@@ -8,6 +8,7 @@ This guide explains what operators need to know about running the Dacci applicat
 | --- | --- | --- |
 | `DATA_ROOT` | content root for the filesystem-backed knowledge base | required runtime path |
 | `GIT_SYNC_REPO_ROOT` | repository root used for guarded git sync | parent of `DATA_ROOT` when unset; sibling `E2Open.KPE.Content` when both defaults are used |
+| `DACCI_LIBRARY_ROOTS` | comma-separated absolute allowlist for custom Library repo roots | empty unless configured; Docker Compose defaults to `/workspace` |
 | `GIT_SYNC_REMOTE_NAME` | remote used for fetch, pull, and push | `origin` |
 | `GIT_SYNC_RELEASE_BRANCH` | branch used for release guidance | `default` |
 
@@ -29,54 +30,37 @@ export DATA_ROOT=../E2Open.KPE.Content/data
 export GIT_SYNC_REPO_ROOT=../E2Open.KPE.Content
 ```
 
-Packaged Docker and Kubernetes runtimes follow the same rule conceptually: the Dacci API only needs the Git-backed content checkout plus optional SSH material at runtime. The app code itself comes from the built image.
+The packaged local Docker runtime follows the same rule conceptually: the Dacci API only needs the Git-backed content checkout at runtime. The app code itself comes from the built image. Kubernetes assets are still in the repo, but they are archived reference material rather than the active deployment target for this branch.
 
-## Git authentication
+Custom Library repos are only accepted when their absolute runtime path lives under `DACCI_LIBRARY_ROOTS`. In Docker Compose, sibling checkouts are now mounted at `/workspace`, so Library entries should use in-container paths such as `/workspace/Dacci.Example.Content`.
 
-The sync layer shells out to `git` and disables interactive prompts. Packaged runtimes keep credentials operator-supplied.
+## Git access
 
-| Runtime | Operator input | Mount path | Expected names | Remote shape | Git wiring |
+The sync layer shells out to `git` and disables interactive prompts. The active packaged-runtime target is now one local Docker mode:
+
+| Runtime or mode | Operator input | Stored in browser | Stored server-side | Remote shape | Git wiring |
 | --- | --- | --- | --- | --- | --- |
-| Docker Compose | host-side SSH credential directory | `/var/run/dacci-git` | `id_ed25519`, `known_hosts` | SSH | `GIT_SSH_COMMAND=...` |
-| Kubernetes | Secret `dacci-git-ssh` | `/var/run/dacci-git` | `id_ed25519`, `known_hosts` | SSH | `GIT_SSH_COMMAND=...` |
+| Local Docker runtime | host `~/.ssh` or `DACCI_HOST_SSH_DIR`, plus optional `SSH_AUTH_SOCK` | nothing extra | nothing extra | SSH | mounted host SSH config and forwarded agent socket |
 
-Packaged Docker and Kubernetes manifests can also set `GIT_SYNC_REMOTE_URL` so runtime sync uses SSH without rewriting the repository's saved `origin` URL on disk.
+The packaged API startup and readiness checks validate the configured content root, the Git repository root used for sync, and any configured SSH command files, so bad path wiring shows up before a later sync failure.
 
-The packaged API startup and readiness checks validate the configured content root, the Git repository root used for sync, and the SSH files referenced by `GIT_SSH_COMMAND`, so bad path wiring or missing key material shows up before a later sync failure.
+Docker checklist:
 
-Docker operator checklist:
-
-- place `id_ed25519` and `known_hosts` in `deploy/docker/git-ssh/` or point `DACCI_GIT_SSH_DIR` at another host directory
 - point `DACCI_CONTENT_ROOT` at the external `E2Open.KPE.Content` checkout if it is not cloned beside the Dacci repo
-- keep that directory read-only inside the container at `/var/run/dacci-git`
-- set `GIT_SYNC_REMOTE_URL` to an SSH URL if the saved workspace remote stays on HTTPS
-- rotate credentials by replacing the host files and restarting the API container
+- point `DACCI_LIBRARY_WORKSPACE_ROOT` at the parent directory that contains any sibling Library checkouts when you need custom repos outside the default split layout
+- let `./scripts/up` mount `"$HOME/.ssh"` by default, or override it with `DACCI_HOST_SSH_DIR`
+- start `./scripts/up` from a shell where `SSH_AUTH_SOCK` is set if your SSH keys rely on an agent
+- keep repo remotes on normal SSH URLs
+- set `GIT_SYNC_REMOTE_URL` only when the runtime should override the repo's saved remote URL
 - optional helper scripts:
-  - `./scripts/up` starts the Compose stack in detached mode with `DACCI_GIT_SSH_DIR="$HOME/.ssh"` and targets a sibling `../E2Open.KPE.Content` checkout by default
+  - `./scripts/up` starts the Compose stack in detached mode, targets a sibling `../E2Open.KPE.Content` checkout by default, mounts the parent workspace at `/workspace`, and binds ports on localhost only
   - `./scripts/down` stops the Compose stack
 
-Example Docker credential files:
+Archived Kubernetes note:
 
-`id_ed25519`:
-
-```text
------BEGIN OPENSSH PRIVATE KEY-----
-...
------END OPENSSH PRIVATE KEY-----
-```
-
-`known_hosts`:
-
-```text
-github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
-```
-
-Kubernetes baseline note:
-
-- the API Deployment looks for an optional Secret named `dacci-git-ssh`
-- it mounts that Secret at `/var/run/dacci-git`
-- it sets `GIT_SSH_COMMAND` to use the mounted key material
-- `GIT_SYNC_REMOTE_URL` can force an SSH remote without rewriting the saved repo config
+- the manifests remain checked in as reference material while the product target shifts to local Docker
+- they are not the active deployment path for current runtime validation or routine repo checks
+- if you still use them manually, the API Deployment looks for an optional Secret named `dacci-git-ssh`
 
 ## Sync guardrails
 
@@ -150,21 +134,17 @@ Docker runtime:
 ```bash
 npm run docker:config
 npm run docker:up
-curl http://localhost:3000/health
-curl http://localhost:3000/ready
-curl http://localhost:4173/health
-curl http://localhost:4173/runtime-config.json
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/ready
+curl http://127.0.0.1:4173/health
+curl http://127.0.0.1:4173/runtime-config.json
 npm run docker:down
 ```
 
-Kubernetes runtime:
+Archived Kubernetes reference:
 
-```bash
-npm run k8s:render
-npm run k8s:validate
-```
-
-If the client-side Kubernetes dry-run hangs locally, fall back to `npm run k8s:render` and inspect the rendered manifest set before applying it.
+- the manifests under `deploy/k8s/` and `deploy/k8s-overlays/` are kept for historical/operator context only
+- they are no longer exposed through top-level npm scripts or included in the active validation checklist on this branch
 
 ## Production focus areas
 

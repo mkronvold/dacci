@@ -217,6 +217,7 @@ export interface GitSyncScheduleState {
 }
 
 export interface GitSyncStatus {
+  repo?: RepoContextSummary;
   repoRoot: string;
   contentRoot: string;
   contentPath: string;
@@ -224,6 +225,7 @@ export interface GitSyncStatus {
   releaseBranch: string;
   isReleaseBranch: boolean;
   remoteName: string;
+  remoteUrl?: string;
   upstreamBranch?: string;
   ahead: number;
   behind: number;
@@ -237,6 +239,8 @@ export interface GitSyncStatus {
   recommendedActions: string[];
   lastContentCommit?: GitSyncCommitSummary;
   scheduler?: GitSyncScheduleState;
+  schedulerSupported?: boolean;
+  schedulerUnsupportedReason?: string;
 }
 
 export interface GitSyncPushRequest {
@@ -287,6 +291,42 @@ export interface ContentEngineSummary {
   documentCount: number;
 }
 
+export const configuredRepoId = "configured-repo";
+export const repoSelectionHeaderName = "x-dacci-repo-selection";
+
+export interface LibraryRepoDefinition {
+  id: string;
+  name: string;
+  repoRoot: string;
+  dataRoot?: string;
+  releaseBranch?: string;
+}
+
+export interface SavedLibraryRepoDefinition extends LibraryRepoDefinition {
+  source?: "configured" | "saved";
+}
+
+export interface DefaultRepoSelection {
+  kind: "default";
+}
+
+export interface LibraryRepoSelection {
+  kind: "library";
+  repo: LibraryRepoDefinition;
+}
+
+export type RepoSelection = DefaultRepoSelection | LibraryRepoSelection;
+
+export interface RepoContextSummary {
+  id: string;
+  kind: "default" | "library";
+  name: string;
+  repoRoot: string;
+  dataRoot: string;
+  isDefault: boolean;
+  releaseBranch?: string;
+}
+
 export interface HealthCheckResponse {
   status: "ok";
   service: string;
@@ -297,9 +337,25 @@ export interface ApiInfoResponse {
   phase: string;
   service: string;
   endpoints: string[];
+  configuredRepo: RepoContextSummary;
 }
 
 export interface ApiErrorResponse {
   error: string;
   message: string;
+}
+
+export interface LibraryRepoTestRequest {
+  repo: LibraryRepoDefinition;
+}
+
+export interface LibraryRepoTestResponse {
+  repo: RepoContextSummary;
+  content: ContentEngineSummary;
+  git: {
+    repoRoot: string;
+    contentRoot: string;
+    contentPath: string;
+    currentBranch: string;
+  };
 }
