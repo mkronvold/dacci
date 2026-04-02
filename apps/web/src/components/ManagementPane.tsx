@@ -9,6 +9,7 @@ import type {
   ImportFormat,
   ImportFolderMappingMode,
 } from "@dacci/shared-types";
+import { isThemeName, themeOptions, type ThemeName } from "../utils/theme";
 
 interface ManagementPaneProps {
   open: boolean;
@@ -17,6 +18,7 @@ interface ManagementPaneProps {
   syncStatus: GitSyncStatus | null;
   syncError: string | null;
   selectedDocumentChanged: boolean;
+  currentTheme: ThemeName;
   syncPushMessage: string;
   syncScheduleForm: {
     enabled: boolean;
@@ -58,6 +60,7 @@ interface ManagementPaneProps {
   selectedDocument: ContentDocument | null;
   onToggleOpen: () => void;
   onSyncPushMessageChange: (value: string) => void;
+  onThemeChange: (value: ThemeName) => void;
   onRefreshSync: () => void;
   onSyncPull: () => void;
   onSyncPush: () => void;
@@ -115,6 +118,9 @@ export function ManagementPane(props: ManagementPaneProps) {
   });
   const importSelectionPreview = selectedImportPaths.slice(0, 3).join(", ");
   const hasMoreSelectedImports = selectedImportPaths.length > 3;
+  const selectedThemeDescription =
+    themeOptions.find((option) => option.value === props.currentTheme)?.description ??
+    "The current blue/slate Dacci palette.";
 
   return (
     <aside className="panel management-pane open">
@@ -157,6 +163,33 @@ export function ManagementPane(props: ManagementPaneProps) {
           ) : (
             <p className="muted">Waiting for the local API health endpoint...</p>
           )}
+        </section>
+
+        <section className="management-card">
+          <h3>Theme</h3>
+          <div className="form-grid">
+            <label>
+              <span>Application theme</span>
+              <select
+                disabled={props.busy}
+                onChange={(event) => {
+                  const nextTheme = event.currentTarget.value;
+                  if (isThemeName(nextTheme)) {
+                    props.onThemeChange(nextTheme);
+                  }
+                }}
+                value={props.currentTheme}
+              >
+                {themeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="muted">{selectedThemeDescription}</p>
+            <p className="muted">Applies across Workspace, Manage, Library, Sync, and shared controls.</p>
+          </div>
         </section>
 
         <section className="management-card">

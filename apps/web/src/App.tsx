@@ -67,6 +67,7 @@ import {
   toLibraryRepoDefinition,
   writePersistedLibraryState,
 } from "./utils/libraryRepos";
+import { applyThemeName, readPersistedThemeName, type ThemeName, writePersistedThemeName } from "./utils/theme";
 
 const defaultApiBaseUrl = "http://localhost:3000";
 const createContentRepoGuideUrl = "https://github.com/mkronvold/Dacci.Example.Content/blob/main/README.md";
@@ -524,6 +525,7 @@ export function App(props: AppProps) {
   const [libraryRepoForm, setLibraryRepoForm] = useState<LibraryRepoFormState>(createEmptyLibraryRepoFormState);
   const [libraryTestResult, setLibraryTestResult] = useState<LibraryRepoTestResponse | null>(null);
   const [libraryImportInputKey, setLibraryImportInputKey] = useState(0);
+  const [themeName, setThemeName] = useState<ThemeName>(() => readPersistedThemeName());
   const [outlineOpen, setOutlineOpen] = useState(persistedUiToggleState.outlineOpen);
   const [showTags, setShowTags] = useState(persistedUiToggleState.showTags);
   const [showHidden, setShowHidden] = useState(persistedUiToggleState.showHidden);
@@ -1994,6 +1996,11 @@ export function App(props: AppProps) {
   }, [apiBaseUrl, outlineOpen]);
 
   useEffect(() => {
+    applyThemeName(themeName);
+    writePersistedThemeName(themeName);
+  }, [themeName]);
+
+  useEffect(() => {
     writePersistedUiToggleState(apiBaseUrl, {
       navigationPaneOpen,
       openSidePanel,
@@ -2084,7 +2091,7 @@ export function App(props: AppProps) {
   }, [outlineOpen, scrollPaneSectionIntoView, showDocumentOutline]);
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-theme={themeName}>
       <section className="hero-card" ref={heroCardRef}>
         <div className="hero-card-header">
           <div className="hero-copy">
@@ -2378,6 +2385,7 @@ export function App(props: AppProps) {
             {managementPaneOpen ? (
               <ManagementPane
                 busy={busy}
+                currentTheme={themeName}
                 documentForm={documentForm}
                 exportForm={exportForm}
                 health={health}
@@ -2494,6 +2502,7 @@ export function App(props: AppProps) {
                 onSyncPull={handleSyncPull}
                 onSyncPush={handleSyncPush}
                 onSyncPushMessageChange={setSyncPushMessage}
+                onThemeChange={setThemeName}
                 onToggleOpen={handleToggleManagementPane}
                 onTopicFormNameChange={(value) => setTopicForm({ name: value })}
               />
