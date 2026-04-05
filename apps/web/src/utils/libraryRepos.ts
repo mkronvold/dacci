@@ -53,9 +53,10 @@ export function readPersistedLibraryState(apiBaseUrl: string): PersistedLibraryS
           ? candidate.selectedRepoId
           : defaultState.lastViewedRepoId;
 
+    const browserSavedEntries = filterBrowserSavedLibraryRepos(entries);
     return {
-      entries: sortSavedLibraryRepos(entries),
-      lastViewedRepoId: normalizeLastViewedRepoId(rawLastViewedRepoId, entries),
+      entries: browserSavedEntries,
+      lastViewedRepoId: normalizeLastViewedRepoId(rawLastViewedRepoId, browserSavedEntries),
     };
   } catch (error) {
     console.warn("Failed to read saved library state from localStorage.", error);
@@ -157,6 +158,18 @@ export function isConfiguredLibraryRepo(repo: SavedLibraryRepoDefinition): boole
   return repo.source === "configured" || repo.id === configuredRepoId;
 }
 
+export function isDiscoveredLibraryRepo(repo: SavedLibraryRepoDefinition): boolean {
+  return repo.source === "discovered";
+}
+
+export function isBrowserSavedLibraryRepo(repo: SavedLibraryRepoDefinition): boolean {
+  return !isConfiguredLibraryRepo(repo) && !isDiscoveredLibraryRepo(repo);
+}
+
+export function filterBrowserSavedLibraryRepos(entries: SavedLibraryRepoDefinition[]): SavedLibraryRepoDefinition[] {
+  return sortSavedLibraryRepos(entries.filter((entry) => isBrowserSavedLibraryRepo(entry)));
+}
+
 export function toLibraryRepoDefinition(repo: SavedLibraryRepoDefinition): LibraryRepoDefinition {
   const definition: LibraryRepoDefinition = {
     id: repo.id,
@@ -201,6 +214,14 @@ function parseSavedLibraryRepoDefinition(value: unknown): SavedLibraryRepoDefini
     typeof candidate.releaseBranch === "string" && candidate.releaseBranch.trim().length > 0
       ? candidate.releaseBranch.trim()
       : undefined;
+  const commitAuthorName =
+    typeof candidate.commitAuthorName === "string" && candidate.commitAuthorName.trim().length > 0
+      ? candidate.commitAuthorName.trim()
+      : undefined;
+  const commitAuthorEmail =
+    typeof candidate.commitAuthorEmail === "string" && candidate.commitAuthorEmail.trim().length > 0
+      ? candidate.commitAuthorEmail.trim()
+      : undefined;
   const source =
     candidate.source === "configured" || candidate.source === "discovered" || candidate.source === "saved"
       ? candidate.source
@@ -219,6 +240,12 @@ function parseSavedLibraryRepoDefinition(value: unknown): SavedLibraryRepoDefini
   }
   if (source) {
     parsedRepo.source = source;
+  }
+  if (commitAuthorName) {
+    parsedRepo.commitAuthorName = commitAuthorName;
+  }
+  if (commitAuthorEmail) {
+    parsedRepo.commitAuthorEmail = commitAuthorEmail;
   }
 
   return parsedRepo;
@@ -277,18 +304,7 @@ function mergeRuntimeLibraryRepo(
   existingEntry: SavedLibraryRepoDefinition | undefined,
   runtimeRepo: SavedLibraryRepoDefinition,
 ): SavedLibraryRepoDefinition {
-  if (!existingEntry) {
-    return runtimeRepo;
-  }
-
-  if (isConfiguredLibraryRepo(runtimeRepo)) {
-    return {
-      ...runtimeRepo,
-      source: "configured",
-    };
-  }
-
-  if (existingEntry.source === "saved") {
+  if (existingEntry?.source === "saved") {
     const mergedSavedRepo: SavedLibraryRepoDefinition = {
       id: existingEntry.id,
       source: "saved",
@@ -303,7 +319,24 @@ function mergeRuntimeLibraryRepo(
     if (releaseBranch) {
       mergedSavedRepo.releaseBranch = releaseBranch;
     }
+    if (existingEntry.commitAuthorName) {
+      mergedSavedRepo.commitAuthorName = existingEntry.commitAuthorName;
+    }
+    if (existingEntry.commitAuthorEmail) {
+      mergedSavedRepo.commitAuthorEmail = existingEntry.commitAuthorEmail;
+    }
     return mergedSavedRepo;
+  }
+
+  if (!existingEntry) {
+    return runtimeRepo;
+  }
+
+  if (isConfiguredLibraryRepo(runtimeRepo)) {
+    return {
+      ...runtimeRepo,
+      source: "configured",
+    };
   }
 
   const mergedRuntimeRepo: SavedLibraryRepoDefinition = {

@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { repoSelectionHeaderName } from "@dacci/shared-types";
+import { configuredRepoId, repoSelectionHeaderName } from "@dacci/shared-types";
 import type {
+  LibraryRepoCreateRequest,
+  LibraryRepoRemoteAdoptRequest,
+  LibraryRepoCreateVisibility,
   ApiInfoResponse,
   ContentDocument,
   ContentExportBundle,
@@ -60,6 +63,7 @@ import {
   buildRepoSelection,
   createDiscoveredLibraryRepo,
   encodeRepoSelectionHeaderValue,
+  filterBrowserSavedLibraryRepos,
   findSavedLibraryRepo,
   isConfiguredLibraryRepo,
   readPersistedLibraryState,
@@ -67,7 +71,13 @@ import {
   toLibraryRepoDefinition,
   writePersistedLibraryState,
 } from "./utils/libraryRepos";
-import { applyThemeName, readPersistedThemeName, type ThemeName, writePersistedThemeName } from "./utils/theme";
+import {
+  applyThemeName,
+  readPersistedScopedThemeName,
+  readPersistedThemeName,
+  type ThemeName,
+  writePersistedThemeName,
+} from "./utils/theme";
 
 const defaultApiBaseUrl = "http://localhost:3000";
 const createContentRepoGuideUrl = "https://github.com/mkronvold/Dacci.Example.Content/blob/main/README.md";
@@ -127,7 +137,12 @@ type SyncScheduleFormState = {
   intervalMinutes: string;
 };
 
-type LibraryRepoFormState = {
+type CommitAuthorFormState = {
+  commitAuthorName: string;
+  commitAuthorEmail: string;
+};
+
+type LibraryRepoFormState = CommitAuthorFormState & {
   id: string | null;
   source: "configured" | "discovered" | "saved" | null;
   name: string;
@@ -138,12 +153,60 @@ type LibraryRepoFormState = {
 
 function createEmptyLibraryRepoFormState(): LibraryRepoFormState {
   return {
+    commitAuthorName: "",
+    commitAuthorEmail: "",
     id: null,
     source: null,
     name: "",
     repoRoot: "",
     dataRoot: "",
     releaseBranch: "",
+  };
+}
+
+type CreateLibraryRepoFormState = CommitAuthorFormState & {
+  name: string;
+  githubOwner: string;
+  githubUsername: string;
+  githubRepo: string;
+  releaseBranch: string;
+  visibility: LibraryRepoCreateVisibility;
+  sshHostAlias: string;
+};
+
+type RemoteAdoptLibraryRepoFormState = CommitAuthorFormState & {
+  name: string;
+  githubOwner: string;
+  githubUsername: string;
+  githubRepo: string;
+  releaseBranch: string;
+  sshHostAlias: string;
+};
+
+function createEmptyCreateLibraryRepoFormState(): CreateLibraryRepoFormState {
+  return {
+    commitAuthorName: "",
+    commitAuthorEmail: "",
+    name: "",
+    githubOwner: "",
+    githubUsername: "",
+    githubRepo: "",
+    releaseBranch: "main",
+    visibility: "private",
+    sshHostAlias: "",
+  };
+}
+
+function createEmptyRemoteAdoptLibraryRepoFormState(): RemoteAdoptLibraryRepoFormState {
+  return {
+    commitAuthorName: "",
+    commitAuthorEmail: "",
+    name: "",
+    githubOwner: "",
+    githubUsername: "",
+    githubRepo: "",
+    releaseBranch: "main",
+    sshHostAlias: "",
   };
 }
 
@@ -523,12 +586,20 @@ export function App(props: AppProps) {
   const [libraryEntries, setLibraryEntries] = useState<SavedLibraryRepoDefinition[]>(persistedLibraryState.entries);
   const [selectedRepoId, setSelectedRepoId] = useState(persistedLibraryState.lastViewedRepoId);
   const [libraryRepoForm, setLibraryRepoForm] = useState<LibraryRepoFormState>(createEmptyLibraryRepoFormState);
+  const [libraryRemoteAdoptForm, setLibraryRemoteAdoptForm] = useState<RemoteAdoptLibraryRepoFormState>(
+    createEmptyRemoteAdoptLibraryRepoFormState,
+  );
+  const [libraryCreateForm, setLibraryCreateForm] = useState<CreateLibraryRepoFormState>(
+    createEmptyCreateLibraryRepoFormState,
+  );
   const [libraryTestResult, setLibraryTestResult] = useState<LibraryRepoTestResponse | null>(null);
   const [libraryImportInputKey, setLibraryImportInputKey] = useState(0);
   const [themeName, setThemeName] = useState<ThemeName>(() => readPersistedThemeName());
+  const [hydratedThemeScopeId, setHydratedThemeScopeId] = useState<string | null>(null);
   const [outlineOpen, setOutlineOpen] = useState(persistedUiToggleState.outlineOpen);
   const [showTags, setShowTags] = useState(persistedUiToggleState.showTags);
   const [showHidden, setShowHidden] = useState(persistedUiToggleState.showHidden);
+  const currentThemeNameRef = useRef(themeName);
   const heroCardRef = useRef<HTMLElement | null>(null);
   const navigationPaneRef = useRef<HTMLElement | null>(null);
   const externalOutlineRef = useRef<HTMLElement | null>(null);
@@ -560,12 +631,13 @@ export function App(props: AppProps) {
     [selectedDocumentDraft],
   );
   const selectedDocumentTagsInfo = useMemo(() => extractDocumentTags(selectedDocumentDraft), [selectedDocumentDraft]);
+  const selectedDocumentFrontMatterError = selectedDocumentTagsInfo.parseError;
   const selectedDocumentVisibleMarkdown = useMemo(() => stripFrontMatter(selectedDocumentDraft), [selectedDocumentDraft]);
   const selectedDocumentHeadings = useMemo(
     () => extractMarkdownHeadings(selectedDocumentVisibleMarkdown),
     [selectedDocumentVisibleMarkdown],
   );
-  const selectedDocumentTags = selectedDocumentTagsInfo.parseError ? (selectedDocument?.tags ?? []) : selectedDocumentTagsInfo.tags;
+  const selectedDocumentTags = selectedDocumentFrontMatterError ? (selectedDocument?.tags ?? []) : selectedDocumentTagsInfo.tags;
 
   const selectedDocumentHasPendingSync = useMemo(() => {
     if (!selectedDocument || !syncStatus) {
@@ -646,13 +718,43 @@ export function App(props: AppProps) {
   );
   const hasActiveRepoSelection =
     activeRepoSelection.kind === "library" || Boolean(apiInfo?.configuredRepo);
+  const ghCliAvailable = apiInfo?.capabilities.ghCliAvailable ?? false;
+  const primaryLibraryRoot = libraryDiscovery?.libraryRoots[0] ?? "";
+  const libraryRepoWorkspaceSupported = (libraryDiscovery?.libraryRoots.length ?? 0) > 0;
+  const libraryRemoteAdoptSupportMessage =
+    !libraryDiscovery
+      ? "Checking remote adoption support from the API."
+      : !libraryRepoWorkspaceSupported
+        ? "Adopt Remote Repository needs at least one configured library root so Dacci knows where new checkouts are allowed."
+        : null;
+  const libraryRepoCreationSupported = ghCliAvailable && libraryRepoWorkspaceSupported;
+  const libraryRepoCreationSupportMessage =
+    !apiInfo || !libraryDiscovery
+      ? "Checking repository creation support from the API."
+      : !ghCliAvailable
+        ? "GitHub CLI is not available in this runtime, so Create Repository is disabled here."
+        : !libraryRepoWorkspaceSupported
+          ? "Create Repository needs at least one configured library root so Dacci knows where new checkouts are allowed."
+          : null;
+  const libraryRemoteAdoptRepoRootPreview = buildDerivedLibraryCheckoutRoot(
+    primaryLibraryRoot,
+    libraryRemoteAdoptForm.githubRepo,
+  );
+  const libraryCreateRepoRootPreview = buildDerivedLibraryCheckoutRoot(primaryLibraryRoot, libraryCreateForm.githubRepo);
   const activeRepoLabel =
     findSavedLibraryRepo(libraryEntries, selectedRepoId)?.name ??
     libraryEntries[0]?.name ??
     apiInfo?.configuredRepo?.name ??
     "Content repository";
+  const browserSavedLibraryEntries = useMemo(
+    () => filterBrowserSavedLibraryRepos(libraryEntries),
+    [libraryEntries],
+  );
   const selectedLibraryRepo =
     findSavedLibraryRepo(libraryEntries, selectedRepoId) ?? null;
+  const activeThemeScopeId =
+    selectedLibraryRepo?.id ??
+    (apiInfo?.configuredRepo ? configuredRepoId : null);
   const updateSavedRepoFromSummary = useCallback((summary: RepoContextSummary) => {
     setLibraryEntries((current) => {
       const repo = findSavedLibraryRepo(current, summary.id);
@@ -1620,6 +1722,16 @@ export function App(props: AppProps) {
         throw new Error("Enter a sync commit message before pushing.");
       }
 
+      const commitAuthorName = selectedLibraryRepo?.commitAuthorName?.trim() ?? "";
+      const commitAuthorEmail = selectedLibraryRepo?.commitAuthorEmail?.trim() ?? "";
+      if (syncStatus.hasContentChanges && (!commitAuthorName || !commitAuthorEmail)) {
+        throw new Error(
+          selectedLibraryRepo
+            ? `Set a commit name and email for '${selectedLibraryRepo.name}' in the Library pane before pushing content changes.`
+            : "Set a browser-saved repo commit name and email in the Library pane before pushing content changes.",
+        );
+      }
+
       const remoteTargetLabel = syncStatus.remoteUrl
         ? `${syncStatus.remoteName} (${syncStatus.remoteUrl})`
         : syncStatus.remoteName;
@@ -1631,7 +1743,11 @@ export function App(props: AppProps) {
         const result = await requestSelectedRepoApi<GitSyncOperationResponse>("/api/sync/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: commitMessage }),
+          body: JSON.stringify({
+            message: commitMessage,
+            commitAuthorName: commitAuthorName || undefined,
+            commitAuthorEmail: commitAuthorEmail || undefined,
+          }),
         });
         setSyncStatus(result.status);
         setMessage(result.summary);
@@ -1640,7 +1756,7 @@ export function App(props: AppProps) {
         handleRevealTopNotices();
       }
     });
-  }, [handleRevealTopNotices, requestSelectedRepoApi, runAction, syncPushMessage, syncStatus]);
+  }, [handleRevealTopNotices, requestSelectedRepoApi, runAction, selectedLibraryRepo, syncPushMessage, syncStatus]);
 
   const handleConfigureSyncSchedule = useCallback(() => {
     void runAction("sync-schedule-configure", async () => {
@@ -1691,6 +1807,34 @@ export function App(props: AppProps) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ repo: toLibraryRepoDefinition(repo) }),
+        },
+      ),
+    [apiBaseUrl],
+  );
+
+  const adoptRemoteLibraryRepo = useCallback(
+    async (request: LibraryRepoRemoteAdoptRequest) =>
+      requestApi<LibraryRepoTestResponse>(
+        apiBaseUrl,
+        "/api/library/adopt-remote",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      ),
+    [apiBaseUrl],
+  );
+
+  const createLibraryRepo = useCallback(
+    async (request: LibraryRepoCreateRequest) =>
+      requestApi<LibraryRepoTestResponse>(
+        apiBaseUrl,
+        "/api/library/create",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
         },
       ),
     [apiBaseUrl],
@@ -1753,6 +1897,8 @@ export function App(props: AppProps) {
       const result = await validateLibraryRepo(repo);
       const validatedRepo = applyRepoSummaryToSavedRepo(repo, result.repo);
       setLibraryRepoForm({
+        commitAuthorName: validatedRepo.commitAuthorName ?? "",
+        commitAuthorEmail: validatedRepo.commitAuthorEmail ?? "",
         id: validatedRepo.id,
         source: validatedRepo.source ?? "saved",
         name: validatedRepo.name,
@@ -1765,8 +1911,36 @@ export function App(props: AppProps) {
     });
   }, [libraryRepoForm, runAction, validateLibraryRepo]);
 
+  const handleAdoptRemoteLibraryRepo = useCallback(() => {
+    void runAction("adopt-remote-library-repo", async () => {
+      const { repo, request } = buildLibraryRepoRemoteAdoptRequestFromForm(libraryRemoteAdoptForm, primaryLibraryRoot);
+      const result = await adoptRemoteLibraryRepo(request);
+      const validatedRepo = applyRepoSummaryToSavedRepo(repo, result.repo);
+      setLibraryEntries((current) => upsertLibraryRepo(current, validatedRepo));
+      setLibraryRemoteAdoptForm(createEmptyRemoteAdoptLibraryRepoFormState());
+      setLibraryTestResult(result);
+      setLibraryDiscovery(await requestApi<LibraryRepoDiscoveryResponse>(apiBaseUrl, "/api/library/discover"));
+      setMessage(`Adopted remote repository '${validatedRepo.name}'.`);
+    });
+  }, [adoptRemoteLibraryRepo, apiBaseUrl, libraryRemoteAdoptForm, primaryLibraryRoot, runAction]);
+
+  const handleCreateLibraryRepo = useCallback(() => {
+    void runAction("create-library-repo", async () => {
+      const { repo, request } = buildLibraryRepoCreateRequestFromForm(libraryCreateForm, primaryLibraryRoot);
+      const result = await createLibraryRepo(request);
+      const validatedRepo = applyRepoSummaryToSavedRepo(repo, result.repo);
+      setLibraryEntries((current) => upsertLibraryRepo(current, validatedRepo));
+      setLibraryCreateForm(createEmptyCreateLibraryRepoFormState());
+      setLibraryTestResult(result);
+      setLibraryDiscovery(await requestApi<LibraryRepoDiscoveryResponse>(apiBaseUrl, "/api/library/discover"));
+      setMessage(`Created repository '${validatedRepo.name}'.`);
+    });
+  }, [apiBaseUrl, createLibraryRepo, libraryCreateForm, primaryLibraryRoot, runAction]);
+
   const handleEditLibraryRepo = useCallback((repo: SavedLibraryRepoDefinition) => {
     setLibraryRepoForm({
+      commitAuthorName: repo.commitAuthorName ?? "",
+      commitAuthorEmail: repo.commitAuthorEmail ?? "",
       id: repo.id,
       source: isConfiguredLibraryRepo(repo) ? "configured" : (repo.source ?? "saved"),
       name: repo.name,
@@ -1805,37 +1979,52 @@ export function App(props: AppProps) {
         return;
       }
 
-      setLibraryEntries((current) => current.filter((entry) => entry.id !== repoId));
+      const runtimeFallback = runtimeLibraryRepos.find((entry) => entry.repoRoot === repo.repoRoot);
+      const nextEntries = runtimeFallback
+        ? upsertLibraryRepo(
+            libraryEntries.filter((entry) => entry.id !== repoId),
+            runtimeFallback,
+          )
+        : libraryEntries.filter((entry) => entry.id !== repoId);
+
+      setLibraryEntries(nextEntries);
       setLibraryTestResult((current) => (current?.repo.id === repoId ? null : current));
       setLibraryRepoForm((current) => (current.id === repoId ? createEmptyLibraryRepoFormState() : current));
       if (selectedRepoId === repoId) {
-        const remainingEntries = libraryEntries.filter((entry) => entry.id !== repoId);
-        const nextRepo = remainingEntries[0] ?? null;
+        const nextRepo = runtimeFallback ?? nextEntries[0] ?? null;
         resetRepoBoundState();
         setSelectedRepoId(nextRepo?.id ?? "");
         setMessage(
-          nextRepo
+          runtimeFallback
+            ? `Removed browser-saved repository '${repo.name}'. The runtime copy '${runtimeFallback.name}' is still available.`
+            : nextRepo
             ? `Removed '${repo.name}' and switched to '${nextRepo.name}'.`
-            : `Removed saved repository '${repo.name}'.`,
+            : `Removed browser-saved repository '${repo.name}'.`,
         );
         return;
       }
 
-      setMessage(`Removed saved repository '${repo.name}'.`);
+      setMessage(
+        runtimeFallback
+          ? `Removed browser-saved repository '${repo.name}'. The runtime copy remains available.`
+          : `Removed browser-saved repository '${repo.name}'.`,
+      );
     },
-    [libraryEntries, resetRepoBoundState, selectedRepoId],
+    [libraryEntries, resetRepoBoundState, runtimeLibraryRepos, selectedRepoId],
   );
 
   const handleExportLibrary = useCallback(() => {
-    if (libraryEntries.length === 0) {
-      setError("There are no saved repositories to export.");
+    if (browserSavedLibraryEntries.length === 0) {
+      setError("There are no browser-saved repositories to export.");
       return;
     }
 
-    downloadFile(JSON.stringify(libraryEntries, null, 2), "dacci-library-repos.json", "application/json");
+    downloadFile(JSON.stringify(browserSavedLibraryEntries, null, 2), "dacci-library-repos.json", "application/json");
     setError(null);
-    setMessage(`Exported ${libraryEntries.length} saved repositor${libraryEntries.length === 1 ? "y" : "ies"}.`);
-  }, [libraryEntries]);
+    setMessage(
+      `Exported ${browserSavedLibraryEntries.length} browser-saved repositor${browserSavedLibraryEntries.length === 1 ? "y" : "ies"}.`,
+    );
+  }, [browserSavedLibraryEntries]);
 
   const handleImportLibrary = useCallback(
     (file: File | null) => {
@@ -1844,10 +2033,10 @@ export function App(props: AppProps) {
       }
 
       void runAction("import-library", async () => {
-        const importedEntries = parseImportedLibraryEntries(await file.text());
+        const importedEntries = filterBrowserSavedLibraryRepos(parseImportedLibraryEntries(await file.text()));
         if (
-          libraryEntries.length > 0 &&
-          !window.confirm("Replace the current saved repository list with the imported one?")
+          browserSavedLibraryEntries.length > 0 &&
+          !window.confirm("Replace the current browser-saved repository list with the imported one?")
         ) {
           return;
         }
@@ -1863,10 +2052,12 @@ export function App(props: AppProps) {
         setLibraryRepoForm(createEmptyLibraryRepoFormState());
         setLibraryTestResult(null);
         setLibraryImportInputKey((current) => current + 1);
-        setMessage(`Imported ${importedEntries.length} saved repositor${importedEntries.length === 1 ? "y" : "ies"}.`);
+        setMessage(
+          `Imported ${importedEntries.length} browser-saved repositor${importedEntries.length === 1 ? "y" : "ies"}.`,
+        );
       });
     },
-    [libraryEntries, resetRepoBoundState, runAction, runtimeLibraryRepos, selectedRepoId],
+    [browserSavedLibraryEntries.length, resetRepoBoundState, runAction, runtimeLibraryRepos, selectedRepoId],
   );
 
   const handleToggleMode = useCallback(() => {
@@ -1996,9 +2187,38 @@ export function App(props: AppProps) {
   }, [apiBaseUrl, outlineOpen]);
 
   useEffect(() => {
-    applyThemeName(themeName);
-    writePersistedThemeName(themeName);
+    currentThemeNameRef.current = themeName;
   }, [themeName]);
+
+  useEffect(() => {
+    if (!activeThemeScopeId) {
+      setHydratedThemeScopeId(null);
+      return;
+    }
+
+    const persistedThemeName = readPersistedScopedThemeName(activeThemeScopeId);
+    if (persistedThemeName) {
+      setThemeName((current) => (current === persistedThemeName ? current : persistedThemeName));
+    } else {
+      writePersistedThemeName(currentThemeNameRef.current, activeThemeScopeId);
+    }
+
+    setHydratedThemeScopeId(activeThemeScopeId);
+  }, [activeThemeScopeId]);
+
+  useEffect(() => {
+    applyThemeName(themeName);
+    if (!activeThemeScopeId) {
+      writePersistedThemeName(themeName);
+      return;
+    }
+
+    if (hydratedThemeScopeId !== activeThemeScopeId) {
+      return;
+    }
+
+    writePersistedThemeName(themeName, activeThemeScopeId);
+  }, [activeThemeScopeId, hydratedThemeScopeId, themeName]);
 
   useEffect(() => {
     writePersistedUiToggleState(apiBaseUrl, {
@@ -2013,10 +2233,10 @@ export function App(props: AppProps) {
 
   useEffect(() => {
     writePersistedLibraryState(apiBaseUrl, {
-      entries: libraryEntries,
+      entries: browserSavedLibraryEntries,
       lastViewedRepoId: selectedRepoId,
     });
-  }, [apiBaseUrl, libraryEntries, selectedRepoId]);
+  }, [apiBaseUrl, browserSavedLibraryEntries, selectedRepoId]);
 
   useEffect(() => {
     if (!selectedDocumentHasFrontMatter && showHidden) {
@@ -2325,6 +2545,11 @@ export function App(props: AppProps) {
                     : "document-surface-card document-surface-edit"
                 }
               >
+                {selectedDocumentFrontMatterError ? (
+                  <p className="notice error document-parse-notice">
+                    Front matter warning: {selectedDocumentFrontMatterError}
+                  </p>
+                ) : null}
                 {documentMode === "view" && showTags ? (
                   <div className="document-tag-row editable" aria-label="Document tags">
                     {selectedDocumentTags.map((tag) => (
@@ -2333,21 +2558,29 @@ export function App(props: AppProps) {
                         <button
                           aria-label={`Remove tag ${tag}`}
                           className="document-tag-pill-remove"
+                          disabled={Boolean(selectedDocumentFrontMatterError)}
                           onClick={() => handleRemoveTag(tag)}
+                          title={selectedDocumentFrontMatterError ?? undefined}
                           type="button"
                         >
                           ×
                         </button>
                       </span>
                     ))}
-                    <button className="document-tag-pill document-tag-pill-action" onClick={handleAddTag} type="button">
+                    <button
+                      className="document-tag-pill document-tag-pill-action"
+                      disabled={Boolean(selectedDocumentFrontMatterError)}
+                      onClick={handleAddTag}
+                      title={selectedDocumentFrontMatterError ?? undefined}
+                      type="button"
+                    >
                       Add tag
                     </button>
                   </div>
                 ) : null}
                 {documentMode === "view" ? (
                   <div className={showInlineOutline ? "document-reader-layout with-outline" : "document-reader-layout"}>
-                    <MarkdownViewer markdown={selectedDocumentDraft} showFrontMatter={showHidden} />
+                    <MarkdownViewer markdown={selectedDocumentDraft} showFrontMatter={showHidden} themeName={themeName} />
                     {showInlineOutline ? (
                       <DocumentOutlinePane className="inline-outline-panel" headings={selectedDocumentHeadings} />
                     ) : null}
@@ -2513,21 +2746,139 @@ export function App(props: AppProps) {
                 activeRepoLabel={activeRepoLabel}
                 busy={busy}
                 createContentRepoGuideUrl={createContentRepoGuideUrl}
+                createForm={libraryCreateForm}
+                createRepoRootPreview={libraryCreateRepoRootPreview}
+                createRepoSupported={libraryRepoCreationSupported}
+                createRepoSupportMessage={libraryRepoCreationSupportMessage}
                 editSectionRef={libraryEditSectionRef}
                 scrollContainerRef={libraryPaneScrollRef}
                 form={libraryRepoForm}
                 importInputKey={libraryImportInputKey}
-                savedRepos={libraryEntries}
+                repos={libraryEntries}
+                remoteAdoptForm={libraryRemoteAdoptForm}
+                remoteAdoptRepoRootPreview={libraryRemoteAdoptRepoRootPreview}
+                remoteAdoptRepoSupported={libraryRepoWorkspaceSupported}
+                remoteAdoptRepoSupportMessage={libraryRemoteAdoptSupportMessage}
                 selectedRepoId={selectedRepoId}
                 testResult={libraryTestResult}
+                onAdoptRemoteRepo={handleAdoptRemoteLibraryRepo}
                 onCancelEdit={handleCancelLibraryEdit}
+                onCreateFormGithubOwnerChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    githubOwner: value,
+                  }))
+                }
+                onCreateFormCommitAuthorEmailChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    commitAuthorEmail: value,
+                  }))
+                }
+                onCreateFormCommitAuthorNameChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    commitAuthorName: value,
+                  }))
+                }
+                onCreateFormGithubUsernameChange={(value) =>
+                  setLibraryCreateForm((current) => updateGitHubIdentityFormState(current, value))
+                }
+                onCreateFormGithubRepoChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    githubRepo: value,
+                  }))
+                }
+                onCreateFormNameChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    name: value,
+                  }))
+                }
+                onCreateFormReleaseBranchChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    releaseBranch: value,
+                  }))
+                }
+                onCreateFormSshHostAliasChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    sshHostAlias: value,
+                  }))
+                }
+                onCreateFormVisibilityChange={(value) =>
+                  setLibraryCreateForm((current) => ({
+                    ...current,
+                    visibility: value,
+                  }))
+                }
+                onCreateRepo={handleCreateLibraryRepo}
                 onEditRepo={handleEditLibraryRepo}
                 onExportLibrary={handleExportLibrary}
+                onRemoteAdoptFormGithubOwnerChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    githubOwner: value,
+                  }))
+                }
+                onRemoteAdoptFormCommitAuthorEmailChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    commitAuthorEmail: value,
+                  }))
+                }
+                onRemoteAdoptFormCommitAuthorNameChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    commitAuthorName: value,
+                  }))
+                }
+                onRemoteAdoptFormGithubUsernameChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => updateGitHubIdentityFormState(current, value))
+                }
+                onRemoteAdoptFormGithubRepoChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    githubRepo: value,
+                  }))
+                }
+                onRemoteAdoptFormNameChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    name: value,
+                  }))
+                }
+                onRemoteAdoptFormReleaseBranchChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    releaseBranch: value,
+                  }))
+                }
+                onRemoteAdoptFormSshHostAliasChange={(value) =>
+                  setLibraryRemoteAdoptForm((current) => ({
+                    ...current,
+                    sshHostAlias: value,
+                  }))
+                }
                 onRefreshRepositories={handleRefreshLibraryRepositories}
                 onFormDataRootChange={(value) =>
                   setLibraryRepoForm((current) => ({
                     ...current,
                     dataRoot: value,
+                  }))
+                }
+                onFormCommitAuthorEmailChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    commitAuthorEmail: value,
+                  }))
+                }
+                onFormCommitAuthorNameChange={(value) =>
+                  setLibraryRepoForm((current) => ({
+                    ...current,
+                    commitAuthorName: value,
                   }))
                 }
                 onFormNameChange={(value) =>
@@ -2670,6 +3021,210 @@ function normalizeRepoPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+/g, "/");
 }
 
+type GitHubIdentityFormState = {
+  githubUsername: string;
+  sshHostAlias: string;
+};
+
+type LibraryRepoOnboardingFormState = CommitAuthorFormState & {
+  name: string;
+  githubOwner: string;
+  githubUsername: string;
+  githubRepo: string;
+  releaseBranch: string;
+  sshHostAlias: string;
+};
+
+function readOptionalCommitAuthorIdentity(form: CommitAuthorFormState): {
+  commitAuthorName?: string;
+  commitAuthorEmail?: string;
+} {
+  const commitAuthorName = form.commitAuthorName.trim();
+  const commitAuthorEmail = form.commitAuthorEmail.trim();
+  if (commitAuthorName && !commitAuthorEmail) {
+    throw new Error("Commit email is required when a commit name is set.");
+  }
+  if (commitAuthorEmail && !commitAuthorName) {
+    throw new Error("Commit name is required when a commit email is set.");
+  }
+  const identity: {
+    commitAuthorName?: string;
+    commitAuthorEmail?: string;
+  } = {};
+  if (commitAuthorName) {
+    identity.commitAuthorName = commitAuthorName;
+  }
+  if (commitAuthorEmail) {
+    identity.commitAuthorEmail = commitAuthorEmail;
+  }
+  return identity;
+}
+
+function requireCommitAuthorIdentity(
+  form: CommitAuthorFormState,
+  actionLabel: string,
+): { commitAuthorName: string; commitAuthorEmail: string } {
+  const commitAuthorName = form.commitAuthorName.trim();
+  if (!commitAuthorName) {
+    throw new Error(`${actionLabel} requires a commit name.`);
+  }
+
+  const commitAuthorEmail = form.commitAuthorEmail.trim();
+  if (!commitAuthorEmail) {
+    throw new Error(`${actionLabel} requires a commit email.`);
+  }
+
+  return {
+    commitAuthorName,
+    commitAuthorEmail,
+  };
+}
+
+function updateGitHubIdentityFormState<T extends GitHubIdentityFormState>(current: T, nextGitHubUsername: string): T {
+  const currentGithubUsername = current.githubUsername.trim();
+  const currentSshHostAlias = current.sshHostAlias.trim();
+  const shouldFollowGitHubUsername = !currentSshHostAlias || currentSshHostAlias === currentGithubUsername;
+
+  return {
+    ...current,
+    githubUsername: nextGitHubUsername,
+    sshHostAlias: shouldFollowGitHubUsername ? nextGitHubUsername : current.sshHostAlias,
+  };
+}
+
+function buildDerivedLibraryCheckoutRoot(libraryRoot: string, githubRepo: string): string {
+  const normalizedLibraryRoot = libraryRoot.trim();
+  const normalizedGitHubRepo = githubRepo.trim();
+  if (!normalizedLibraryRoot || !normalizedGitHubRepo) {
+    return "";
+  }
+
+  return normalizeRepoPath(`${normalizedLibraryRoot}/${normalizedGitHubRepo}`);
+}
+
+function buildLibraryRepoRemoteAdoptRequestFromForm(
+  form: RemoteAdoptLibraryRepoFormState,
+  primaryLibraryRoot: string,
+): {
+  repo: SavedLibraryRepoDefinition;
+  request: LibraryRepoRemoteAdoptRequest;
+} {
+  const { githubOwner, githubRepo, githubUsername, repo, sshHostAlias } = buildLibraryRepoOnboardingStateFromForm(
+    form,
+    primaryLibraryRoot,
+  );
+
+  return {
+    repo,
+    request: {
+      repo: toLibraryRepoOnboardingRequestRepo(repo),
+      githubOwner,
+      githubRepo,
+      githubUsername,
+      sshHostAlias,
+    },
+  };
+}
+
+function buildLibraryRepoCreateRequestFromForm(
+  form: CreateLibraryRepoFormState,
+  primaryLibraryRoot: string,
+): {
+  repo: SavedLibraryRepoDefinition;
+  request: LibraryRepoCreateRequest;
+} {
+  const { githubOwner, githubRepo, githubUsername, repo, sshHostAlias } = buildLibraryRepoOnboardingStateFromForm(
+    form,
+    primaryLibraryRoot,
+  );
+
+  return {
+    repo,
+    request: {
+      repo: toLibraryRepoOnboardingRequestRepo(repo),
+      githubOwner,
+      githubRepo,
+      githubUsername,
+      visibility: form.visibility,
+      sshHostAlias,
+      ...requireCommitAuthorIdentity(form, "Create Repository"),
+    },
+  };
+}
+
+function buildLibraryRepoOnboardingStateFromForm(
+  form: LibraryRepoOnboardingFormState,
+  primaryLibraryRoot: string,
+): {
+  repo: SavedLibraryRepoDefinition;
+  githubOwner: string;
+  githubRepo: string;
+  githubUsername: string;
+  sshHostAlias: string;
+} {
+  const githubUsername = form.githubUsername.trim();
+  if (!githubUsername) {
+    throw new Error("GitHub username is required.");
+  }
+
+  const githubOwner = form.githubOwner.trim() || githubUsername;
+
+  const githubRepo = form.githubRepo.trim();
+  if (!githubRepo) {
+    throw new Error("GitHub repository name is required.");
+  }
+
+  const repoRoot = buildDerivedLibraryCheckoutRoot(primaryLibraryRoot, githubRepo);
+  if (!repoRoot) {
+    throw new Error("Dacci needs a configured workspace root before it can clone repositories.");
+  }
+
+  if (!looksLikeAbsolutePath(repoRoot)) {
+    throw new Error("Derived repository destination must be an absolute path.");
+  }
+
+  const releaseBranch = form.releaseBranch.trim();
+  if (!releaseBranch) {
+    throw new Error("Repository branch is required.");
+  }
+
+  const repo: SavedLibraryRepoDefinition = {
+    id: createLibraryRepoId(),
+    source: "saved",
+    name: form.name.trim() || githubRepo,
+    repoRoot,
+    releaseBranch,
+  };
+  const commitIdentity = readOptionalCommitAuthorIdentity(form);
+  if (commitIdentity.commitAuthorName) {
+    repo.commitAuthorName = commitIdentity.commitAuthorName;
+  }
+  if (commitIdentity.commitAuthorEmail) {
+    repo.commitAuthorEmail = commitIdentity.commitAuthorEmail;
+  }
+
+  return {
+    repo,
+    githubOwner,
+    githubRepo,
+    githubUsername,
+    sshHostAlias: form.sshHostAlias.trim() || githubUsername,
+  };
+}
+
+function toLibraryRepoOnboardingRequestRepo(repo: SavedLibraryRepoDefinition): LibraryRepoCreateRequest["repo"] {
+  const releaseBranch = repo.releaseBranch?.trim();
+  if (!releaseBranch) {
+    throw new Error("Repository branch is required.");
+  }
+
+  return {
+    id: repo.id,
+    name: repo.name,
+    releaseBranch,
+  };
+}
+
 function buildLibraryRepoDefinitionFromForm(form: LibraryRepoFormState): SavedLibraryRepoDefinition {
   const name = form.name.trim();
   if (!name) {
@@ -2691,10 +3246,9 @@ function buildLibraryRepoDefinitionFromForm(form: LibraryRepoFormState): SavedLi
   }
   const releaseBranch = form.releaseBranch.trim();
 
-  const source = form.source === "configured" ? "configured" : "saved";
   const baseRepo: SavedLibraryRepoDefinition = {
     id: form.id ?? createLibraryRepoId(),
-    source,
+    source: "saved",
     name,
     repoRoot,
   };
@@ -2704,6 +3258,13 @@ function buildLibraryRepoDefinitionFromForm(form: LibraryRepoFormState): SavedLi
   }
   if (releaseBranch) {
     baseRepo.releaseBranch = releaseBranch;
+  }
+  const commitIdentity = readOptionalCommitAuthorIdentity(form);
+  if (commitIdentity.commitAuthorName) {
+    baseRepo.commitAuthorName = commitIdentity.commitAuthorName;
+  }
+  if (commitIdentity.commitAuthorEmail) {
+    baseRepo.commitAuthorEmail = commitIdentity.commitAuthorEmail;
   }
 
   return baseRepo;
@@ -2774,6 +3335,8 @@ function parseImportedLibraryRepo(value: unknown): SavedLibraryRepoDefinition {
       ? candidate.source
       : "saved";
   const releaseBranch = typeof candidate.releaseBranch === "string" ? candidate.releaseBranch.trim() : "";
+  const commitAuthorName = typeof candidate.commitAuthorName === "string" ? candidate.commitAuthorName.trim() : "";
+  const commitAuthorEmail = typeof candidate.commitAuthorEmail === "string" ? candidate.commitAuthorEmail.trim() : "";
 
   const repo: SavedLibraryRepoDefinition = {
     id,
@@ -2786,6 +3349,12 @@ function parseImportedLibraryRepo(value: unknown): SavedLibraryRepoDefinition {
   }
   if (releaseBranch) {
     repo.releaseBranch = releaseBranch;
+  }
+  if (commitAuthorName) {
+    repo.commitAuthorName = commitAuthorName;
+  }
+  if (commitAuthorEmail) {
+    repo.commitAuthorEmail = commitAuthorEmail;
   }
 
   return repo;
@@ -2812,6 +3381,12 @@ function applyRepoSummaryToSavedRepo(
   } else if (repo.releaseBranch) {
     nextRepo.releaseBranch = repo.releaseBranch;
   }
+  if (repo.commitAuthorName) {
+    nextRepo.commitAuthorName = repo.commitAuthorName;
+  }
+  if (repo.commitAuthorEmail) {
+    nextRepo.commitAuthorEmail = repo.commitAuthorEmail;
+  }
 
   return nextRepo;
 }
@@ -2823,6 +3398,8 @@ function savedLibraryRepoEquals(left: SavedLibraryRepoDefinition, right: SavedLi
     left.repoRoot === right.repoRoot &&
     (left.dataRoot ?? "") === (right.dataRoot ?? "") &&
     (left.releaseBranch ?? "") === (right.releaseBranch ?? "") &&
+    (left.commitAuthorName ?? "") === (right.commitAuthorName ?? "") &&
+    (left.commitAuthorEmail ?? "") === (right.commitAuthorEmail ?? "") &&
     (left.source ?? "") === (right.source ?? "")
   );
 }

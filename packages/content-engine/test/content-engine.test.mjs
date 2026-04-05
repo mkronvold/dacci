@@ -44,6 +44,73 @@ test("content engine keeps topic-level document paths logical while storing them
   assert.equal(tree.topics[0]?.subtopics[0]?.documents.length, 0);
 });
 
+test("content engine creates gitkeep placeholders for empty topics and subtopics", async (t) => {
+  const dataRoot = await createTempDataRoot("dacci-engine-gitkeep-");
+  t.after(async () => {
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  const engine = new ContentEngine({ dataRoot });
+
+  await engine.createTopic("Operations");
+  await engine.createSubtopic("Operations", "Runbooks");
+
+  await access(path.join(dataRoot, "Operations", ".gitkeep"));
+  await access(path.join(dataRoot, "Operations", "Runbooks", ".gitkeep"));
+
+  const initialSummary = await engine.getSummary();
+  assert.equal(initialSummary.documentCount, 0);
+
+  let tree = await engine.getTree();
+  assert.equal(tree.topics[0]?.documents.length, 0);
+  assert.equal(tree.topics[0]?.subtopics[0]?.documents.length, 0);
+
+  await engine.createDocument({
+    topicName: "Operations",
+    name: "Overview",
+    body: "# Overview\n",
+  });
+  await engine.createDocument({
+    topicName: "Operations",
+    subtopicName: "Runbooks",
+    name: "Deploy Guide",
+    body: "# Deploy\n",
+  });
+
+  await engine.deleteDocument("Operations/Overview.md");
+  await engine.deleteDocument("Operations/Runbooks/Deploy Guide.md");
+
+  await access(path.join(dataRoot, "Operations", ".gitkeep"));
+  await access(path.join(dataRoot, "Operations", "Runbooks", ".gitkeep"));
+
+  tree = await engine.getTree();
+  assert.equal(tree.topics[0]?.documents.length, 0);
+  assert.equal(tree.topics[0]?.subtopics[0]?.documents.length, 0);
+});
+
+test("content engine backfills gitkeep placeholders when legacy directories become empty", async (t) => {
+  const dataRoot = await createTempDataRoot("dacci-engine-gitkeep-legacy-");
+  t.after(async () => {
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  await mkdir(path.join(dataRoot, "Legacy", "Runbooks"), { recursive: true });
+  await writeFile(path.join(dataRoot, "Legacy", "Overview.md"), "# Overview\n", "utf8");
+  await writeFile(path.join(dataRoot, "Legacy", "Runbooks", "Deploy Guide.md"), "# Deploy\n", "utf8");
+
+  const engine = new ContentEngine({ dataRoot });
+
+  await engine.deleteDocument("Legacy/Overview.md");
+  await engine.deleteDocument("Legacy/Runbooks/Deploy Guide.md");
+
+  await access(path.join(dataRoot, "Legacy", ".gitkeep"));
+  await access(path.join(dataRoot, "Legacy", "Runbooks", ".gitkeep"));
+
+  const tree = await engine.getTree();
+  assert.equal(tree.topics[0]?.documents.length, 0);
+  assert.equal(tree.topics[0]?.subtopics[0]?.documents.length, 0);
+});
+
 test("content engine resolves legacy topic-level storage without CatchAll", async (t) => {
   const dataRoot = await createTempDataRoot("dacci-engine-legacy-");
   t.after(async () => {
@@ -129,7 +196,40 @@ test("content engine parses normalized front matter tags and supports tag-aware 
   assert.equal(generalTagSearch.results[0]?.matchedField, "tag");
 });
 
-test("content engine rejects invalid front matter tag shapes", async (t) => {
+test("content engine keeps malformed front matter readable so broken docs stay editable", async (t) => {
+  const dataRoot = await createTempDataRoot("dacci-engine-frontmatter-malformed-");
+  t.after(async () => {
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  await mkdir(path.join(dataRoot, "Internet"), { recursive: true });
+  const malformedBody = "---\ntags:\n  - outage\n# Comcast outage troubleshooting\n";
+  await writeFile(path.join(dataRoot, "Internet", "Comcast outtages.md"), malformedBody, "utf8");
+
+  const engine = new ContentEngine({ dataRoot });
+
+  const tree = await engine.getTree();
+  assert.equal(tree.topics[0]?.documents[0]?.path, "Internet/Comcast outtages.md");
+  assert.equal(
+    tree.topics[0]?.documents[0]?.parseError,
+    "Document 'Internet/Comcast outtages.md' starts with front matter but is missing a closing delimiter.",
+  );
+
+  const document = await engine.getDocument("Internet/Comcast outtages.md");
+  assert.equal(document.body, malformedBody);
+  assert.deepEqual(document.tags, []);
+  assert.equal(
+    document.parseError,
+    "Document 'Internet/Comcast outtages.md' starts with front matter but is missing a closing delimiter.",
+  );
+
+  const bodySearch = await engine.searchDocuments("troubleshooting");
+  assert.equal(bodySearch.results.length, 1);
+  assert.equal(bodySearch.results[0]?.document.path, "Internet/Comcast outtages.md");
+  assert.equal(bodySearch.results[0]?.matchedField, "body");
+});
+
+test("content engine preserves invalid front matter tags instead of rejecting the document", async (t) => {
   const dataRoot = await createTempDataRoot("dacci-engine-tags-invalid-");
   t.after(async () => {
     await rm(dataRoot, { recursive: true, force: true });
@@ -137,14 +237,23 @@ test("content engine rejects invalid front matter tag shapes", async (t) => {
 
   const engine = new ContentEngine({ dataRoot });
   await engine.createTopic("Operations");
-  await assert.rejects(
-    () =>
-      engine.createDocument({
-        topicName: "Operations",
-        name: "Broken Tags",
-        body: "---\ntags:\n  priority: high\n---\n# Broken\n",
-      }),
-    /must declare tags as a string or string array/,
+  const document = await engine.createDocument({
+    topicName: "Operations",
+    name: "Broken Tags",
+    body: "---\ntags:\n  priority: high\n---\n# Broken\n",
+  });
+
+  assert.deepEqual(document.tags, []);
+  assert.equal(
+    document.parseError,
+    "Document 'Operations/Broken Tags.md' must declare tags as a string or string array in front matter.",
+  );
+
+  const tree = await engine.getTree();
+  assert.equal(tree.topics[0]?.documents[0]?.path, "Operations/Broken Tags.md");
+  assert.equal(
+    tree.topics[0]?.documents[0]?.parseError,
+    "Document 'Operations/Broken Tags.md' must declare tags as a string or string array in front matter.",
   );
 });
 

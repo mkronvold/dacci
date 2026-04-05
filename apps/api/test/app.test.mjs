@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { buildApp, validateAppRuntimeConfiguration } from "../dist/app.js";
@@ -24,6 +25,18 @@ async function runGit(args, cwd) {
       GIT_TERMINAL_PROMPT: "0",
     },
   });
+}
+
+async function readGitStdout(args, cwd) {
+  const result = await execFileAsync("git", args, {
+    cwd,
+    maxBuffer: 10 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
+  return result.stdout.trim();
 }
 
 async function createGitBackedContentRepo(prefix, files, baseDir) {
@@ -66,6 +79,112 @@ async function addLocalOrigin(repoRoot) {
   return remoteRepo;
 }
 
+async function installFakeGh(t, options = {}) {
+  const binRoot = await createTempDataRoot("dacci-api-fake-gh-bin-");
+  const remoteRoot = await createTempDataRoot("dacci-api-fake-gh-remote-");
+  const ghPath = path.join(binRoot, "gh");
+  const versionLine = options.versionLine ?? "gh version 9.9.9-test";
+  await writeFile(
+    ghPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+remote_root="\${DACCI_TEST_FAKE_GH_ROOT:?}"
+
+if [[ "\${1-}" == "--version" ]]; then
+  printf '%s\n' "${versionLine}"
+  exit 0
+fi
+
+if [[ "\${1-}" == "repo" && "\${2-}" == "create" ]]; then
+  spec="\${3:?missing repo spec}"
+  owner="\${spec%%/*}"
+  repo="\${spec##*/}"
+  bare_repo="\${remote_root}/\${owner}/\${repo}.git"
+  if [[ -e "\${bare_repo}" ]]; then
+    printf 'repository already exists: %s\n' "\${spec}" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "\${bare_repo}")"
+  git init --bare --initial-branch=main "\${bare_repo}" >/dev/null
+  exit 0
+fi
+
+if [[ "\${1-}" == "repo" && "\${2-}" == "clone" ]]; then
+  spec="\${3:?missing repo spec}"
+  destination="\${4:?missing destination}"
+  owner="\${spec%%/*}"
+  repo="\${spec##*/}"
+  bare_repo="\${remote_root}/\${owner}/\${repo}.git"
+  git clone "\${bare_repo}" "\${destination}" >/dev/null 2>&1
+  exit 0
+fi
+
+printf 'unsupported fake gh command: %s\n' "$*" >&2
+exit 1
+`,
+    "utf8",
+  );
+  await chmod(ghPath, 0o755);
+
+  const previousPath = process.env.PATH;
+  const previousRemoteRoot = process.env.DACCI_TEST_FAKE_GH_ROOT;
+  process.env.PATH = `${binRoot}${path.delimiter}${previousPath ?? ""}`;
+  process.env.DACCI_TEST_FAKE_GH_ROOT = remoteRoot;
+
+  t.after(async () => {
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+
+    if (previousRemoteRoot === undefined) {
+      delete process.env.DACCI_TEST_FAKE_GH_ROOT;
+    } else {
+      process.env.DACCI_TEST_FAKE_GH_ROOT = previousRemoteRoot;
+    }
+
+    await rm(binRoot, { recursive: true, force: true });
+    await rm(remoteRoot, { recursive: true, force: true });
+  });
+
+  return {
+    remoteRoot,
+  };
+}
+
+async function setTemporaryHome(t) {
+  const homeRoot = await createTempDataRoot("dacci-api-home-");
+  const previousHome = process.env.HOME;
+  process.env.HOME = homeRoot;
+
+  t.after(async () => {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+
+    await rm(homeRoot, { recursive: true, force: true });
+  });
+
+  return homeRoot;
+}
+
+async function writeGitInsteadOfConfig(homeRoot, hostAlias, replacementRoot) {
+  const replacementUrl = pathToFileURL(`${replacementRoot}${path.sep}`).href;
+  await writeFile(
+    path.join(homeRoot, ".gitconfig"),
+    `[url "${replacementUrl}"]\n\tinsteadOf = git@${hostAlias}:\n`,
+    "utf8",
+  );
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 test("api returns 400 when document path is missing", async (t) => {
   const dataRoot = await createTempDataRoot("dacci-api-");
   const app = await buildApp({ dataRoot, gitSyncRepoRoot: dataRoot });
@@ -88,6 +207,9 @@ test("api returns 400 when document path is missing", async (t) => {
 });
 
 test("api advertises the phase 12 runtime endpoints", async (t) => {
+  await installFakeGh(t, {
+    versionLine: "gh version 2.99.0-test",
+  });
   const repoRoot = await createTempDataRoot("dacci-api-info-");
   const dataRoot = path.join(repoRoot, "data");
   await mkdir(dataRoot, { recursive: true });
@@ -119,9 +241,13 @@ test("api advertises the phase 12 runtime endpoints", async (t) => {
   assert.equal(body.configuredRepo.repoRoot, repoRoot);
   assert.equal(body.configuredRepo.dataRoot, dataRoot);
   assert.equal(body.configuredRepo.releaseBranch, "default");
+  assert.equal(body.capabilities.ghCliAvailable, true);
+  assert.equal(body.capabilities.ghCliVersion, "gh version 2.99.0-test");
   assert.ok(body.endpoints.includes("/ready"));
   assert.ok(body.endpoints.includes("/api/search"));
   assert.ok(body.endpoints.includes("/api/library/discover"));
+  assert.ok(body.endpoints.includes("/api/library/create"));
+  assert.ok(body.endpoints.includes("/api/library/adopt-remote"));
   assert.ok(body.endpoints.includes("/api/import/documents"));
   assert.ok(body.endpoints.includes("/api/export"));
   assert.ok(body.endpoints.includes("/api/topics"));
@@ -194,6 +320,152 @@ test("api discovers configured and sibling workspace repos", async (t) => {
   assert.equal(librarySummary.kind, "library");
   assert.equal(librarySummary.dataRoot, libraryRepo.dataRoot);
   assert.match(librarySummary.id, /^discovered-[0-9a-f]{12}$/);
+});
+
+test("api creates and bootstraps a new personal library repo when GitHub owner is blank", async (t) => {
+  const { remoteRoot } = await installFakeGh(t);
+  const workspaceRoot = await createTempDataRoot("dacci-api-library-create-");
+  const homeRoot = await setTemporaryHome(t);
+  await writeGitInsteadOfConfig(homeRoot, "octocat", remoteRoot);
+  const app = await buildApp({
+    libraryRepoRoots: [workspaceRoot],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+
+  const repoRoot = path.join(workspaceRoot, "Created.Content");
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/library/create",
+    payload: {
+      repo: {
+        id: "created-content",
+        name: "Created Content",
+        releaseBranch: "release/main",
+      },
+      commitAuthorName: "Ada Lovelace",
+      commitAuthorEmail: "ada@example.com",
+      githubOwner: "   ",
+      githubRepo: "Created.Content",
+      githubUsername: "octocat",
+      visibility: "private",
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  const body = response.json();
+  assert.equal(body.repo.id, "created-content");
+  assert.equal(body.repo.name, "octocat/Created.Content");
+  assert.equal(body.repo.repoRoot, repoRoot);
+  assert.equal(body.repo.dataRoot, path.join(repoRoot, "data"));
+  assert.equal(body.repo.releaseBranch, "release/main");
+  assert.equal(body.content.topicCount, 0);
+  assert.equal(body.content.documentCount, 0);
+  assert.equal(body.git.currentBranch, "release/main");
+
+  const [readme, gitignore, gitConfigContents, latestCommitAuthor, originUrl, currentBranch, sshConfigContents, discoveryResponse] = await Promise.all([
+    readFile(path.join(repoRoot, "README.md"), "utf8"),
+    readFile(path.join(repoRoot, ".gitignore"), "utf8"),
+    readFile(path.join(repoRoot, ".git", "config"), "utf8"),
+    readGitStdout(["log", "-1", "--format=%an <%ae>"], repoRoot),
+    readGitStdout(["config", "--get", "remote.origin.url"], repoRoot),
+    readGitStdout(["branch", "--show-current"], repoRoot),
+    readFile(path.join(homeRoot, ".ssh", "config"), "utf8"),
+    app.inject({
+      method: "GET",
+      url: "/api/library/discover",
+    }),
+  ]);
+
+  assert.match(readme, /bootstrapped by Dacci/i);
+  assert.match(readme, /octocat\/Created\.Content/);
+  assert.match(gitignore, /\.obsidian\//);
+  assert.equal(latestCommitAuthor, "Ada Lovelace <ada@example.com>");
+  assert.doesNotMatch(gitConfigContents, /^\s*name\s*=\s*Ada Lovelace$/m);
+  assert.doesNotMatch(gitConfigContents, /^\s*email\s*=\s*ada@example\.com$/m);
+  assert.equal(originUrl, "git@octocat:octocat/Created.Content.git");
+  assert.equal(currentBranch, "release/main");
+  assert.match(sshConfigContents, /^Host octocat$/m);
+  assert.match(sshConfigContents, /^\s*IdentityFile ~\/\.ssh\/id_ed25519_octocat$/m);
+
+  const discoveryBody = discoveryResponse.json();
+  const createdRepo = discoveryBody.repos.find((repo) => repo.repoRoot === repoRoot);
+  assert.ok(createdRepo);
+
+  const remoteBareRepo = path.join(remoteRoot, "octocat", "Created.Content.git");
+  assert.equal(await readGitStdout(["rev-parse", "--verify", "refs/heads/release/main"], remoteBareRepo), await readGitStdout(["rev-parse", "HEAD"], repoRoot));
+});
+
+test("api adopts a personal remote repository and inserts a missing SSH host alias when GitHub owner is blank", async (t) => {
+  const workspaceRoot = await createTempDataRoot("dacci-api-library-adopt-remote-");
+  const remoteRoot = await createTempDataRoot("dacci-api-library-adopt-remote-origin-");
+  const sourceRepo = await createGitBackedContentRepo("adopt-remote-source-", [
+    {
+      path: "Platform/Kubernetes/Overview.md",
+      body: "# Remote overview\n",
+    },
+  ]);
+  const homeRoot = await setTemporaryHome(t);
+  await writeGitInsteadOfConfig(homeRoot, "github-work", remoteRoot);
+
+  const remoteBareRepo = path.join(remoteRoot, "octocat", "Existing.Content.git");
+  await mkdir(path.dirname(remoteBareRepo), { recursive: true });
+  await runGit(["init", "--bare", "--initial-branch=main", remoteBareRepo], path.dirname(remoteBareRepo));
+  await runGit(["checkout", "-b", "release/main"], sourceRepo.repoRoot);
+  await runGit(["remote", "add", "origin", remoteBareRepo], sourceRepo.repoRoot);
+  await runGit(["push", "-u", "origin", "main", "release/main"], sourceRepo.repoRoot);
+
+  const app = await buildApp({
+    libraryRepoRoots: [workspaceRoot],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(remoteRoot, { recursive: true, force: true });
+    await rm(sourceRepo.repoRoot, { recursive: true, force: true });
+  });
+
+  const repoRoot = path.join(workspaceRoot, "Existing.Content");
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/library/adopt-remote",
+    payload: {
+      repo: {
+        id: "existing-content",
+        name: "Existing Content",
+        releaseBranch: "release/main",
+      },
+      githubOwner: "",
+      githubRepo: "Existing.Content",
+      githubUsername: "octocat",
+      sshHostAlias: "github-work",
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  const body = response.json();
+  assert.equal(body.repo.id, "existing-content");
+  assert.equal(body.repo.repoRoot, repoRoot);
+  assert.equal(body.repo.dataRoot, path.join(repoRoot, "data"));
+  assert.equal(body.repo.releaseBranch, "release/main");
+  assert.equal(body.content.topicCount, 1);
+  assert.equal(body.content.documentCount, 1);
+  assert.equal(body.git.currentBranch, "release/main");
+
+  const [originUrl, sshConfigContents, adoptedDocument] = await Promise.all([
+    readGitStdout(["remote", "get-url", "origin"], repoRoot),
+    readFile(path.join(homeRoot, ".ssh", "config"), "utf8"),
+    readFile(path.join(repoRoot, "data", "Platform", "Kubernetes", "Overview.md"), "utf8"),
+  ]);
+
+  assert.equal(originUrl, pathToFileURL(remoteBareRepo).href);
+  assert.match(sshConfigContents, /^Host github-work$/m);
+  assert.match(sshConfigContents, /^\s*IdentityFile ~\/\.ssh\/id_ed25519_octocat$/m);
+  assert.match(adoptedDocument, /Remote overview/);
 });
 
 test("api starts cleanly with an empty workspace", async (t) => {
@@ -313,7 +585,7 @@ test("api readiness fails when configured Git SSH files are missing", async (t) 
     dataRoot,
     gitSyncRepoRoot: repoRoot,
     gitSshCommand:
-      `ssh -i ${path.join(repoRoot, "missing-id_ed25519")} -o IdentitiesOnly=yes -o UserKnownHostsFile=${path.join(repoRoot, "missing-known_hosts")}`,
+      `ssh -F ${path.join(repoRoot, "missing-config")} -i ${path.join(repoRoot, "missing-id_ed25519")} -o IdentitiesOnly=yes -o UserKnownHostsFile=${path.join(repoRoot, "missing-known_hosts")}`,
   });
 
   t.after(async () => {
@@ -903,6 +1175,52 @@ test("api exposes tag-aware search results and document tags", async (t) => {
   assert.equal(body.results[0].document.path, "Operations/Release Guide.md");
   assert.equal(body.results[0].matchedField, "tag");
   assert.match(body.results[0].excerpt, /release-notes/);
+});
+
+test("api keeps malformed front matter documents available for navigation and editing", async (t) => {
+  const dataRoot = await createTempDataRoot("dacci-api-frontmatter-malformed-");
+  const app = await buildApp({ dataRoot, gitSyncRepoRoot: dataRoot });
+
+  t.after(async () => {
+    await app.close();
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  await mkdir(path.join(dataRoot, "Internet"), { recursive: true });
+  const malformedBody = "---\ntags:\n  - outage\n# Comcast outage troubleshooting\n";
+  await writeFile(path.join(dataRoot, "Internet", "Comcast outtages.md"), malformedBody, "utf8");
+
+  const treeResponse = await app.inject({
+    method: "GET",
+    url: "/api/tree",
+  });
+
+  assert.equal(treeResponse.statusCode, 200);
+  assert.equal(treeResponse.json().topics[0].documents[0].path, "Internet/Comcast outtages.md");
+  assert.equal(
+    treeResponse.json().topics[0].documents[0].parseError,
+    "Document 'Internet/Comcast outtages.md' starts with front matter but is missing a closing delimiter.",
+  );
+
+  const documentResponse = await app.inject({
+    method: "GET",
+    url: "/api/documents?path=Internet/Comcast%20outtages.md",
+  });
+
+  assert.equal(documentResponse.statusCode, 200);
+  assert.equal(documentResponse.json().body, malformedBody);
+  assert.equal(
+    documentResponse.json().parseError,
+    "Document 'Internet/Comcast outtages.md' starts with front matter but is missing a closing delimiter.",
+  );
+
+  const searchResponse = await app.inject({
+    method: "GET",
+    url: "/api/search?query=troubleshooting",
+  });
+
+  assert.equal(searchResponse.statusCode, 200);
+  assert.equal(searchResponse.json().results[0].document.path, "Internet/Comcast outtages.md");
 });
 
 test("api imports documents and exports scoped bundles", async (t) => {

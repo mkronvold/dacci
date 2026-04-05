@@ -29,6 +29,8 @@ import type {
   HealthCheckResponse,
   ImportDocumentsRequest,
   LibraryRepoDiscoveryResponse,
+  LibraryRepoCreateRequest,
+  LibraryRepoRemoteAdoptRequest,
   LibraryRepoTestRequest,
   LibraryRepoTestResponse,
   MoveDocumentRequest,
@@ -41,7 +43,9 @@ import { repoSelectionHeaderName } from "@dacci/shared-types";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyRequest } from "fastify";
 
+import { adoptRemoteLibraryRepoCheckout, createLibraryRepoCheckout, readApiCapabilities } from "./libraryRepoCreator.js";
 import { RepoContextResolver, type ResolvedRepoContext } from "./repoContext.js";
+import { refreshManagedRuntimeSshState } from "./runtimeSsh.js";
 import { RepoSyncSchedulerRegistry } from "./schedulerRegistry.js";
 
 export interface BuildAppOptions {
@@ -168,6 +172,7 @@ export async function buildApp(options: BuildAppOptions) {
     phase: "dacci-public-seed",
     service: apiServiceName,
     configuredRepo: repoContextResolver.getDefaultSummary(),
+    capabilities: await readApiCapabilities(),
     endpoints: [
       "/health",
       "/ready",
@@ -178,6 +183,8 @@ export async function buildApp(options: BuildAppOptions) {
       "/api/documents",
       "/api/library/discover",
       "/api/library/test",
+      "/api/library/adopt-remote",
+      "/api/library/create",
       "/api/import/documents",
       "/api/export",
       "/api/topics",
@@ -262,17 +269,36 @@ export async function buildApp(options: BuildAppOptions) {
   });
 
   app.post<{ Body: LibraryRepoTestRequest }>("/api/library/test", async (request): Promise<LibraryRepoTestResponse> => {
+    await refreshManagedRuntimeSshState({ preferLiveSource: true });
     const repoContext = repoContextResolver.resolveLibraryRepo(request.body.repo);
-    const gitSync = repoContext.createGitSync();
-    const [content, git] = await Promise.all([repoContext.createEngine().getSummary(), gitSync.validateConfiguration()]);
-    await gitSync.getStatus({ refreshRemote: true });
-
-    return {
-      repo: repoContext.summary,
-      content,
-      git,
-    };
+    return buildLibraryRepoTestResponse(repoContext, {
+      refreshRemote: true,
+    });
   });
+
+  app.post<{ Body: LibraryRepoRemoteAdoptRequest }>(
+    "/api/library/adopt-remote",
+    async (request, reply): Promise<LibraryRepoTestResponse> => {
+      const repoContext = await adoptRemoteLibraryRepoCheckout(request.body, repoContextResolver);
+      return reply.status(201).send(
+        await buildLibraryRepoTestResponse(repoContext, {
+          refreshRemote: false,
+        }),
+      );
+    },
+  );
+
+  app.post<{ Body: LibraryRepoCreateRequest }>(
+    "/api/library/create",
+    async (request, reply): Promise<LibraryRepoTestResponse> => {
+      const repoContext = await createLibraryRepoCheckout(request.body, repoContextResolver);
+      return reply.status(201).send(
+        await buildLibraryRepoTestResponse(repoContext, {
+          refreshRemote: false,
+        }),
+      );
+    },
+  );
 
   app.post<{ Body: CreateTopicRequest }>("/api/topics", async (request, reply) => {
     const topic = await resolveRepoContext(repoContextResolver, request).createEngine().createTopic(request.body.name);
@@ -464,6 +490,23 @@ function decorateGitSyncStatus(
   };
 }
 
+async function buildLibraryRepoTestResponse(
+  repoContext: ResolvedRepoContext,
+  options?: { refreshRemote?: boolean },
+): Promise<LibraryRepoTestResponse> {
+  const gitSync = repoContext.createGitSync();
+  const [content, git] = await Promise.all([repoContext.createEngine().getSummary(), gitSync.validateConfiguration()]);
+  if (options?.refreshRemote) {
+    await gitSync.getStatus({ refreshRemote: true });
+  }
+
+  return {
+    repo: repoContext.summary,
+    content,
+    git,
+  };
+}
+
 async function validateReadyRuntime(
   engine: ContentEngine,
   gitSync: GitHubSync,
@@ -491,6 +534,7 @@ async function ensureGitSshCommandFilesPresent(gitSshCommand?: string): Promise<
 function parseGitSshCommandFilePaths(gitSshCommand: string): string[] {
   const filePaths = new Set<string>();
   const patterns = [
+    /(?:^|\s)-F\s+("[^"]+"|'[^']+'|[^\s]+)/g,
     /(?:^|\s)-i\s+("[^"]+"|'[^']+'|[^\s]+)/g,
     /(?:^|\s)-o\s+IdentityFile=("[^"]+"|'[^']+'|[^\s]+)/g,
     /(?:^|\s)-o\s+UserKnownHostsFile=("[^"]+"|'[^']+'|[^\s]+)/g,

@@ -297,6 +297,8 @@ body {
   background:
     radial-gradient(circle at top, var(--color-app-glow), transparent 30%),
     linear-gradient(180deg, var(--color-app-bg-start) 0%, var(--color-app-bg-end) 100%);
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
 }
 
 code {
@@ -638,6 +640,10 @@ button:disabled {
   box-shadow: inset 0 1px 0 var(--color-warning-highlight);
 }
 
+.document-parse-notice {
+  margin: 0;
+}
+
 .inline-tool-panel,
 .management-card,
 .empty-viewer-state,
@@ -848,6 +854,118 @@ button:disabled {
   color: var(--color-text-accent);
 }
 
+.markdown-viewer img {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-image-frame {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0;
+}
+
+.markdown-paragraph-group {
+  display: grid;
+  gap: 24px;
+  margin: 24px 0;
+}
+
+.markdown-paragraph-group > p {
+  margin: 0;
+}
+
+.markdown-paragraph-group .markdown-image-frame {
+  margin: 0;
+}
+
+.markdown-image-shell {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-panel);
+}
+
+.markdown-image-link,
+.markdown-image {
+  display: block;
+}
+
+.markdown-image {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.viewer-inline-expand,
+.viewer-lightbox-close {
+  min-width: auto;
+}
+
+.viewer-inline-expand {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  padding: 0.4rem 0.6rem;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease,
+    background-color 160ms ease;
+}
+
+.markdown-image-shell:hover .viewer-inline-expand,
+.markdown-image-shell:focus-within .viewer-inline-expand,
+.mermaid-block-shell:hover .viewer-inline-expand,
+.mermaid-block-shell:focus-within .viewer-inline-expand {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.viewer-inline-expand span {
+  display: block;
+  font-family: monospace;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.viewer-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: rgba(2, 6, 23, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.viewer-lightbox-content {
+  display: grid;
+  justify-items: end;
+  gap: 12px;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.markdown-image-full {
+  display: block;
+  width: auto;
+  max-width: calc(100vw - 96px);
+  max-height: calc(100vh - 120px);
+  height: auto;
+  border-radius: 18px;
+  box-shadow: 0 24px 60px var(--color-shadow-lg);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-strong);
+}
+
 .markdown-viewer hr {
   border: 0;
   border-top: 1px solid var(--color-border-subtle);
@@ -1013,9 +1131,43 @@ button:disabled {
   overflow: auto;
 }
 
+.mermaid-block-shell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
+.mermaid-block-canvas {
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
 .mermaid-block :where(svg) {
   max-width: 100%;
   height: auto;
+}
+
+.mermaid-block-expanded {
+  box-sizing: border-box;
+  width: calc(100vw - 96px);
+  max-width: calc(100vw - 96px);
+  max-height: calc(100vh - 120px);
+  box-shadow: 0 24px 60px var(--color-shadow-lg);
+}
+
+.mermaid-block-expanded :where(svg) {
+  width: 100%;
+  max-width: none;
+  height: auto;
+}
+
+/* Mermaid uses HTML labels inside SVG foreignObjects, so reset markdown prose rules there. */
+.mermaid-block :where(p, li, blockquote) {
+  margin: 0;
+  line-height: 1.35;
+  color: inherit;
 }
 
 .mermaid-block.loading,
@@ -1109,6 +1261,23 @@ button:disabled {
 
 .management-card h3 {
   margin-bottom: 14px;
+}
+
+.management-pane a,
+.library-pane a,
+.sync-pane a {
+  color: var(--color-accent-link);
+  text-decoration-color: currentColor;
+  text-underline-offset: 0.18em;
+}
+
+.management-pane a:hover,
+.management-pane a:focus-visible,
+.library-pane a:hover,
+.library-pane a:focus-visible,
+.sync-pane a:hover,
+.sync-pane a:focus-visible {
+  color: var(--color-text-accent-strong);
 }
 
 .panel-header {
@@ -1209,6 +1378,16 @@ button:disabled {
   display: grid;
   gap: 12px;
   margin-top: 16px;
+}
+
+.library-repo-group {
+  display: grid;
+  gap: 12px;
+}
+
+.library-repo-group h4,
+.library-repo-group p {
+  margin: 0;
 }
 
 .library-repo-item {
@@ -1319,8 +1498,9 @@ button:disabled {
 }
 
 .ghost-button.danger {
+  background: linear-gradient(180deg, var(--color-danger-surface), var(--color-danger-surface-strong));
   border-color: var(--color-danger-border-strong);
-  color: var(--color-danger-text);
+  color: var(--color-button-primary-text);
 }
 
 .sync-push-button.unavailable,

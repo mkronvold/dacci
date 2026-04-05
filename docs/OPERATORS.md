@@ -35,7 +35,7 @@ The packaged local Docker runtime follows the same rule conceptually: the Dacci 
 
 Custom Library repos are only accepted when their absolute runtime path lives under `DACCI_LIBRARY_ROOTS`. In Docker Compose, repo-local checkouts are mounted at `/workspace`, so Library entries should use in-container paths such as `/workspace/Dacci.Example.Content`.
 
-Workspace discovery uses the same direct-child contract under each configured library root: Dacci scans paths like `/workspace/<repo-name>` and only treats them as content repos when they contain Git metadata and a `data/` directory. If no repos are present yet, the packaged runtime still starts so the browser can open the Library panel and guide setup.
+Workspace discovery uses the same direct-child contract under each configured library root: Dacci scans paths like `/workspace/<repo-name>` and only treats them as content repos when they contain Git metadata and a `data/` directory. If no repos are present yet, the packaged runtime still starts so the browser can open the Library panel and guide local adoption, remote adoption, or creation of a new repo.
 
 ## Git access
 
@@ -43,15 +43,35 @@ The sync layer shells out to `git` and disables interactive prompts. The active 
 
 | Runtime or mode | Operator input | Stored in browser | Stored server-side | Remote shape | Git wiring |
 | --- | --- | --- | --- | --- | --- |
-| Local Docker runtime | host `~/.ssh` or `DACCI_HOST_SSH_DIR`, plus optional `SSH_AUTH_SOCK` | nothing extra | nothing extra | SSH | staged copy of host SSH config, with symlinks resolved, plus forwarded agent socket |
+| Local Docker runtime | host `~/.ssh` or `DACCI_HOST_SSH_DIR`, plus optional `SSH_AUTH_SOCK` | per-repo commit name/email and saved repo settings | nothing extra | SSH | live host SSH mount with staged fallback, refreshed into a managed runtime SSH home, plus forwarded agent socket |
 
 The packaged API startup and readiness checks validate the configured content root, the Git repository root used for sync, and any configured SSH command files, so bad path wiring shows up before a later sync failure.
+
+When you start the packaged runtime through `./scripts/up`, both containers also run with the host UID/GID. That keeps bind-mounted workspace writes owned by the host user instead of `root:root`.
+
+## Library repo onboarding
+
+The Library pane now separates three workflows:
+
+- `Adopt Local Repository`: save or override an existing Git-backed content checkout that already exists on disk
+- `Adopt Remote Repository`: clone an existing GitHub-backed content repo into the configured workspace root, check out the selected branch, and save it for use in Dacci
+- `Create Repository`: use `gh` from the API runtime to create a remote repo, clone it into the configured workspace root, seed `README.md`, `.gitignore`, and `data/.gitkeep`, create the selected branch, commit, push, and then rewrite `origin` to the SSH remote Dacci will use afterward
+
+Runtime expectations:
+
+- packaged Docker includes `gh` in the API image, so the browser Create flow can run there without host-side `gh`
+- native API/browser runs still need `gh` available on the host `PATH` for Create; Adopt Remote uses `git` plus SSH only
+- onboarding and edit flows also capture a per-repo commit name and commit email in browser-local state; Dacci uses them for create and sync commits without storing them in `.git/config`
+- both remote onboarding flows ask for a GitHub owner, a GitHub username, a repo name, a branch, and an SSH host alias
+- the SSH host alias defaults from the GitHub username, so org-owned repos can still use a personal GitHub identity cleanly
+- Library validation plus remote adopt/create refresh the runtime SSH layout automatically from the live host mount when available, otherwise from the staged snapshot
+- if the selected SSH alias is missing, Dacci adds a new `Host <alias>` entry to its managed runtime include with `HostName github.com`, `User git`, and an `IdentityFile` that points at `~/.ssh/id_ed25519_<github-username>` inside the active SSH directory
 
 Docker checklist:
 
 - point `DACCI_CONTENT_ROOT` at the external `E2Open.KPE.Content` checkout if it is not cloned beside the Dacci repo
 - point `DACCI_LIBRARY_WORKSPACE_ROOT` at the parent directory that contains any Library checkouts when you need custom repos outside the default workspace layout
-- let `./scripts/up` stage `"$HOME/.ssh"` by default, or override the source directory with `DACCI_HOST_SSH_DIR`
+- let `./scripts/up` stage `"$HOME/.ssh"` by default, or override the source directory with `DACCI_HOST_SSH_DIR`; it will also mount that live directory read-only for automatic runtime refresh
 - start `./scripts/up` from a shell where `SSH_AUTH_SOCK` is set if your SSH keys rely on an agent
 - keep repo remotes on normal SSH URLs
 - set `GIT_SYNC_REMOTE_URL` only when the runtime should override the repo's saved remote URL
@@ -99,10 +119,10 @@ Archived Kubernetes note:
 Common scheduler commands:
 
 ```bash
-npm run cli -- sync schedule configure --enable --interval-minutes 15
-npm run cli -- sync schedule status
-npm run cli -- sync schedule pause
-npm run cli -- sync schedule resume
+./scripts/dacci-cli sync schedule configure --enable --interval-minutes 15
+./scripts/dacci-cli sync schedule status
+./scripts/dacci-cli sync schedule pause
+./scripts/dacci-cli sync schedule resume
 ```
 
 ## Recommended operator flow
@@ -112,13 +132,13 @@ git switch default
 npm install
 npm run typecheck
 npm test
-npm run cli -- sync status
+./scripts/dacci-cli sync status
 ```
 
 If sync status reports blockers:
 
 1. resolve the first blocker
-2. rerun `npm run cli -- sync status --refresh`
+2. rerun `./scripts/dacci-cli sync status --refresh`
 3. only pull or push when the status is clear enough for that action
 4. if the scheduler paused itself, resume it explicitly after cleanup
 

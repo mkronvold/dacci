@@ -45,6 +45,16 @@ stage_host_ssh_dir() {
   printf '%s\n' "${staged_dir}"
 }
 
+validate_numeric_id() {
+  local value="${1}"
+  local label="${2}"
+
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    printf 'scripts/up: %s must be a numeric ID\n' "${label}" >&2
+    exit 1
+  fi
+}
+
 default_workspace_root="${repo_root}/workspace"
 mkdir -p -- "${default_workspace_root}"
 
@@ -77,7 +87,13 @@ if [[ ! -d "${host_ssh_dir}" ]]; then
   printf 'scripts/up: DACCI_HOST_SSH_DIR must point at an existing SSH directory (default: %s)\n' "${HOME}/.ssh" >&2
   exit 1
 fi
-container_ssh_dir="$(stage_host_ssh_dir "${host_ssh_dir}")"
+staged_ssh_dir="$(stage_host_ssh_dir "${host_ssh_dir}")"
+
+host_uid="${DACCI_HOST_UID:-$(id -u)}"
+host_gid="${DACCI_HOST_GID:-$(id -g)}"
+validate_numeric_id "${host_uid}" "DACCI_HOST_UID"
+validate_numeric_id "${host_gid}" "DACCI_HOST_GID"
+runtime_home="${DACCI_RUNTIME_HOME:-/tmp/dacci-home-${host_uid}}"
 
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
   if [[ ! -S "${SSH_AUTH_SOCK}" ]]; then
@@ -111,7 +127,13 @@ compose_env=(
   "DACCI_LIBRARY_WORKSPACE_ROOT=${library_workspace_root}"
   "DACCI_RUNTIME_DATA_ROOT=${runtime_data_root}"
   "DACCI_RUNTIME_GIT_SYNC_REPO_ROOT=${runtime_repo_root}"
-  "DACCI_HOST_SSH_DIR=${container_ssh_dir}"
+  "DACCI_HOST_SSH_STAGE_DIR=${staged_ssh_dir}"
+  "DACCI_HOST_SSH_SOURCE_DIR=${host_ssh_dir}"
+  "DACCI_HOST_UID=${host_uid}"
+  "DACCI_HOST_GID=${host_gid}"
+  "DACCI_RUNTIME_HOME=${runtime_home}"
+  "DACCI_RUNTIME_SSH_STAGE_DIR=/var/run/dacci-host-ssh-stage"
+  "DACCI_RUNTIME_SSH_SOURCE_DIR=/var/run/dacci-host-ssh-live"
   "DACCI_SSH_AUTH_SOCK=${ssh_auth_sock}"
   "DACCI_SSH_AUTH_SOCK_DIR=${ssh_auth_sock_dir}"
 )

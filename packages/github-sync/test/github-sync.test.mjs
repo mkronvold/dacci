@@ -183,6 +183,7 @@ test("github sync commits and pushes content-only changes", async (t) => {
     await rm(fixture.root, { recursive: true, force: true });
   });
 
+  const commitAuthor = "Ada Lovelace <ada@example.com>";
   await writeFile(path.join(fixture.dataRoot, "Guide.md"), "# Guide\n\nSynced\n", "utf8");
 
   const sync = new GitHubSync({
@@ -192,6 +193,8 @@ test("github sync commits and pushes content-only changes", async (t) => {
 
   const result = await sync.pushContent({
     message: "Sync content updates",
+    commitAuthorName: "Ada Lovelace",
+    commitAuthorEmail: "ada@example.com",
   });
 
   assert.equal(result.action, "push");
@@ -203,6 +206,8 @@ test("github sync commits and pushes content-only changes", async (t) => {
   await runGit(["pull", "--ff-only"], fixture.collaboratorRepo);
   const collaboratorBody = await readFile(path.join(fixture.collaboratorDataRoot, "Guide.md"), "utf8");
   assert.equal(collaboratorBody, "# Guide\n\nSynced\n");
+  assert.equal(await runGit(["log", "-1", "--format=%an <%ae>"], fixture.workRepo), commitAuthor);
+  assert.equal(await runGit(["log", "-1", "--format=%an <%ae>"], fixture.collaboratorRepo), commitAuthor);
 });
 
 test("github sync pushes to a local upstream when Git assumes different ownership", async (t) => {
@@ -348,6 +353,7 @@ test("github sync pushes content while keeping committed non-content changes loc
     await rm(fixture.root, { recursive: true, force: true });
   });
 
+  const commitAuthor = "Ada Lovelace <ada@example.com>";
   await writeFile(path.join(fixture.workRepo, "notes.txt"), "tracked\n", "utf8");
   await runGit(["add", "notes.txt"], fixture.workRepo);
   await runGit(["commit", "-m", "Track notes"], fixture.workRepo);
@@ -366,6 +372,8 @@ test("github sync pushes content while keeping committed non-content changes loc
 
   const result = await sync.pushContent({
     message: "Sync content updates",
+    commitAuthorName: "Ada Lovelace",
+    commitAuthorEmail: "ada@example.com",
   });
 
   assert.equal(result.action, "push");
@@ -386,6 +394,9 @@ test("github sync pushes content while keeping committed non-content changes loc
   assert.equal(collaboratorGuideBody, "# Guide\n\nSelective push content\n");
   const collaboratorNotesBody = await readFile(path.join(fixture.collaboratorRepo, "notes.txt"), "utf8");
   assert.equal(collaboratorNotesBody, "tracked\n");
+  assert.equal(await runGit(["log", "-1", "--format=%an <%ae>"], fixture.collaboratorRepo), commitAuthor);
+  assert.equal(await runGit(["log", "-1", "--format=%an <%ae>", "HEAD~1"], fixture.workRepo), commitAuthor);
+  assert.equal(await runGit(["log", "-1", "--format=%cn <%ce>", "HEAD"], fixture.workRepo), commitAuthor);
 });
 
 test("github sync allows untracked non-content files during push", async (t) => {

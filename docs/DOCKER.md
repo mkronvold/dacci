@@ -13,7 +13,10 @@ This guide explains how to run Dacci as a localhost-only Docker Compose app on o
 | Content path in container | `/workspace/<repo-name>/data` |
 | Git sync root in container | `/workspace/<repo-name>` |
 | Default custom library root allowlist | `/workspace` |
-| Host SSH directory mount | `/root/.ssh` |
+| Container user | Host UID/GID when started through `./scripts/up` |
+| Live host SSH directory mount | `/var/run/dacci-host-ssh-live` |
+| Staged host SSH snapshot mount | `/var/run/dacci-host-ssh-stage` |
+| Runtime SSH path in API container | `${HOME}/.ssh` (defaults to `/tmp/dacci-home-<uid>/.ssh` through `./scripts/up`) |
 | Optional forwarded SSH agent | host `SSH_AUTH_SOCK`, mounted at the same path when present |
 
 The packaged runtime expects a real Git-backed content checkout, not just a copy of `data/`.
@@ -25,6 +28,7 @@ The packaged runtime expects a real Git-backed content checkout, not just a copy
 - a local clone of this repository
 - zero or more local content repos cloned into `workspace/`
 - working SSH Git access from the host shell for the content repo remote
+- optional browser-driven repo creation uses `gh`, which is already included in the packaged API image
 
 Recommended local layout:
 
@@ -53,9 +57,14 @@ From the Dacci repository root:
 - defaults `DACCI_LIBRARY_WORKSPACE_ROOT` to the repo-local `./workspace` directory
 - mounts that workspace directory at `/workspace`
 - uses the first discovered content repo in `workspace/` as the compatibility default when one exists
-- still starts cleanly when `workspace/` is empty so the browser can guide setup
-- mounts `"$HOME/.ssh"` into the API container at `/root/.ssh` unless you override `DACCI_HOST_SSH_DIR`
+- still starts cleanly when `workspace/` is empty so the browser can guide local adoption, remote adoption, or creation of a new repo
+- passes your host UID/GID into both containers so bind-mounted workspace writes stay owned by your host user
+- stages `"$HOME/.ssh"` and mounts that staged snapshot into the API container at `/var/run/dacci-host-ssh-stage` unless you override `DACCI_HOST_SSH_DIR`
+- also mounts the live host SSH directory read-only at `/var/run/dacci-host-ssh-live` so repo validation, remote adopt, and create can refresh from current host files without a container restart
+- defaults the runtime home inside both containers to a host-UID-specific path such as `/tmp/dacci-home-1000`
+- exports `GIT_SSH_COMMAND` inside the API container so Git always uses the managed runtime SSH config and runtime `known_hosts`
 - forwards `SSH_AUTH_SOCK` into the API container when it is set in the shell that launches the stack
+- includes `gh` in the API image so the Library pane can create GitHub-backed repos from inside Docker
 - publishes the API and web ports on `127.0.0.1` only
 
 You can still inspect the resolved Compose file directly:
@@ -75,8 +84,9 @@ If you prefer to start Compose manually instead of using `./scripts/up`, set the
 | Relative host path | Defaults to the repo-local `./workspace` directory |
 | Content location | Host `data/` is explicitly bound onto `/workspace/<repo-name>/data` |
 | Library repo location | Host workspace root is bound onto `/workspace` unless `DACCI_LIBRARY_WORKSPACE_ROOT` is set |
+| Container UID/GID | `./scripts/up` exports your host UID/GID so both containers run with matching numeric ownership |
 | Git metadata | Comes from the mounted content repository `.git` directory |
-| Git access | Uses a staged copy of the host `~/.ssh` config, with symlinks resolved, plus any forwarded `ssh-agent` socket |
+| Git access | Uses a live read-only mount of the host `~/.ssh` directory plus a staged fallback snapshot. The API runtime refreshes `${HOME}/.ssh` into a managed layout with `config`, `config.user`, `.dacci-generated.conf`, and `known_hosts`, plus any forwarded `ssh-agent` socket |
 | Scheduler state | Persists with the mounted content repository because it is repo-local |
 
 That explicit `data/` bind still matters when the host content checkout uses a symlink for `data/`. Docker preserves symlinks inside a parent-directory mount, but a direct bind of the `data/` path lets the host resolve a target such as `/mnt/c/...` before the container sees it.
@@ -125,6 +135,8 @@ Example:
 
 With the default repo-local layout, `./scripts/up` mounts `<dacci>/workspace` into the API container at `/workspace`, so any repo cloned under `workspace/` is immediately usable after restarting the stack.
 
+The browser `Adopt Remote Repository` and `Create Repository` flows both target that in-container `/workspace/<repo-name>` layout. Create seeds the checkout with `README.md`, `.gitignore`, and `data/.gitkeep`, pushes the selected branch, keeps `origin` on the alias-aware SSH remote it will use for later sync, and uses the browser-saved commit identity for the initial commit without writing that identity into repo-local Git config.
+
 ## Git access
 
 This branch no longer uses GitHub OAuth, browser-stored GitHub usernames, or request-scoped SSH key selection.
@@ -134,7 +146,10 @@ Instead:
 - keep your content repo remote as a normal SSH remote such as `git@github.com:owner/E2Open.KPE.Content.git`
 - make sure `git -C workspace/E2Open.KPE.Content fetch origin` already works from the host shell
 - start Dacci from a shell where `SSH_AUTH_SOCK` is set if your keys depend on an agent
-- let the API container reuse that mounted SSH config and agent socket
+- let the API container reuse the live host SSH mount, staged fallback snapshot, and forwarded agent socket
+- if you change host SSH files while the stack is running, Library validation plus remote adopt/create will refresh the runtime SSH layout automatically from the live mount when available
+- if a repo should use an alternate GitHub identity, enter the GitHub username plus an optional SSH alias in the Library pane remote onboarding form; Dacci will preserve the copied user config as `config.user`, manage its own aliases in `.dacci-generated.conf`, and point the generated alias `IdentityFile` at `~/.ssh/id_ed25519_<github-username>`
+- enter a commit name and commit email per repo in the Library pane; Dacci stores that identity in browser-local repo settings and injects it only for create and sync commits that Dacci authors
 
 The browser never uploads SSH keys or holds Git credentials.
 
@@ -171,6 +186,6 @@ curl http://127.0.0.1:4173/runtime-config.json
 | --- | --- |
 | Web cannot reach API | `WEB_API_BASE_URL`, container health, and that you opened the UI on `127.0.0.1:4173` or `localhost:4173` |
 | Documents are missing | host content checkout contents, `DACCI_CONTENT_ROOT`, and `/workspace/<repo-name>/data` |
-| Sync fails or `/ready` fails | verify the mounted content checkout includes `.git`, the repo remote uses SSH, the host `~/.ssh` config already works for that remote, and `SSH_AUTH_SOCK` was set before `./scripts/up` if your keys need an agent; `./scripts/up` stages a container-safe copy of that SSH directory before mounting it |
+| Sync fails or `/ready` fails | verify the mounted content checkout includes `.git`, the repo remote uses SSH, the host `~/.ssh` config already works for that remote, and `SSH_AUTH_SOCK` was set before `./scripts/up` if your keys need an agent; `./scripts/up` mounts both a live host SSH directory and a staged fallback snapshot, and Dacci rebuilds `${HOME}/.ssh` from those sources |
 | No repos appear on first load | clone a content repo into `workspace/`, then refresh the page or restart the stack |
 | Path mapping looks wrong | remember relative paths are resolved from the compose file location |

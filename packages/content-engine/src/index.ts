@@ -32,6 +32,7 @@ import {
 } from "@dacci/shared-types";
 
 const CATCH_ALL_SUBTOPIC_NAME = "CatchAll";
+const GITKEEP_FILE_NAME = ".gitkeep";
 
 type ContentLocation = {
   topicName: string;
@@ -48,6 +49,7 @@ type ParsedDocumentContent = {
   rawBody: string;
   visibleBody: string;
   tags: ContentTag[];
+  parseError: string | null;
 };
 
 type ParsedSearchQuery = {
@@ -359,6 +361,7 @@ export class ContentEngine {
     await this.ensureTargetDocumentDirectory(targetTopicName, targetSubtopicName);
     await this.assertFileDoesNotExist(targetAbsolutePath, targetRelativePath);
     await fs.rename(resolvedDocument.absoluteDocumentPath, targetAbsolutePath);
+    await this.ensureGitkeepForLocation(resolvedDocument.location);
 
     return this.getDocument(targetLogicalPath);
   }
@@ -366,6 +369,7 @@ export class ContentEngine {
   public async deleteDocument(relativeDocumentPath: string): Promise<void> {
     const resolvedDocument = await this.resolveExistingDocument(relativeDocumentPath);
     await fs.unlink(resolvedDocument.absoluteDocumentPath);
+    await this.ensureGitkeepForLocation(resolvedDocument.location);
   }
 
   public async renameTopic(currentName: string, nextName: string): Promise<ContentTopicNode> {
@@ -617,15 +621,22 @@ export class ContentEngine {
     size: number,
     modifiedAt: Date,
   ): ContentDocumentSummary {
-    const parsedContent = this.parseDocumentContent(body, this.buildLogicalDocumentPath(
+    const logicalDocumentPath = this.buildLogicalDocumentPath(
       location.topicName,
       path.posix.basename(relativeDocumentPath),
       location.subtopicName,
-    ));
-    return {
+    );
+    const parsedContent = this.parseDocumentContent(body, logicalDocumentPath);
+    const summary: ContentDocumentSummary = {
       ...this.buildMetadataOnlyDocumentSummary(relativeDocumentPath, location, size, modifiedAt),
       tags: parsedContent.tags,
     };
+
+    if (parsedContent.parseError) {
+      summary.parseError = parsedContent.parseError;
+    }
+
+    return summary;
   }
 
   private buildSearchResult(
@@ -743,49 +754,62 @@ export class ContentEngine {
     const frontMatterMatch = /^(?:\uFEFF)?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(body);
     if (!frontMatterMatch) {
       if (/^(?:\uFEFF)?---[ \t]*\r?\n/.test(body)) {
-        throw new ContentEngineError(
-          "invalid_input",
-          `Document '${documentPath}' starts with front matter but is missing a closing delimiter.`,
-        );
+        return {
+          rawBody: body,
+          visibleBody: body,
+          tags: [],
+          parseError: `Document '${documentPath}' starts with front matter but is missing a closing delimiter.`,
+        };
       }
 
       return {
         rawBody: body,
         visibleBody: body,
         tags: [],
+        parseError: null,
       };
     }
 
     const [, frontMatterBody = ""] = frontMatterMatch;
     const visibleBody = body.slice(frontMatterMatch[0].length);
-    let parsedFrontMatter: unknown;
+    let parsedFrontMatter: unknown = null;
+    let parseError: string | null = null;
 
     try {
-      parsedFrontMatter = parseYaml(frontMatterBody);
+      parsedFrontMatter = frontMatterBody.trim() ? parseYaml(frontMatterBody) : null;
     } catch (error) {
-      throw new ContentEngineError(
-        "invalid_input",
-        `Document '${documentPath}' has invalid front matter: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      parseError = `Document '${documentPath}' has invalid front matter: ${error instanceof Error ? error.message : "Unknown error"}`;
     }
 
-    const tags = this.extractDocumentTags(parsedFrontMatter, documentPath);
+    const parsedTags = parseError
+      ? { tags: [] as ContentTag[], parseError }
+      : this.extractDocumentTags(parsedFrontMatter, documentPath);
 
     return {
       rawBody: body,
       visibleBody,
-      tags,
+      tags: parsedTags.tags,
+      parseError: parsedTags.parseError,
     };
   }
 
-  private extractDocumentTags(frontMatter: unknown, documentPath: string): ContentTag[] {
+  private extractDocumentTags(
+    frontMatter: unknown,
+    documentPath: string,
+  ): { tags: ContentTag[]; parseError: string | null } {
     if (!frontMatter || typeof frontMatter !== "object" || Array.isArray(frontMatter)) {
-      return [];
+      return {
+        tags: [],
+        parseError: null,
+      };
     }
 
     const candidate = (frontMatter as Record<string, unknown>).tags;
     if (candidate === undefined) {
-      return [];
+      return {
+        tags: [],
+        parseError: null,
+      };
     }
 
     const rawTags =
@@ -796,26 +820,29 @@ export class ContentEngine {
           : null;
 
     if (!rawTags) {
-      throw new ContentEngineError(
-        "invalid_input",
-        `Document '${documentPath}' must declare tags as a string or string array in front matter.`,
-      );
+      return {
+        tags: [],
+        parseError: `Document '${documentPath}' must declare tags as a string or string array in front matter.`,
+      };
     }
 
     return this.normalizeDocumentTags(rawTags, documentPath);
   }
 
-  private normalizeDocumentTags(tags: string[], documentPath: string): ContentTag[] {
+  private normalizeDocumentTags(
+    tags: string[],
+    documentPath: string,
+  ): { tags: ContentTag[]; parseError: string | null } {
     const normalizedTags: ContentTag[] = [];
     const seenTags = new Set<string>();
 
     for (const tag of tags) {
       const normalizedTag = this.normalizeTagSearchValue(tag);
       if (!normalizedTag) {
-        throw new ContentEngineError(
-          "invalid_input",
-          `Document '${documentPath}' contains an empty or invalid tag.`,
-        );
+        return {
+          tags: [],
+          parseError: `Document '${documentPath}' contains an empty or invalid tag.`,
+        };
       }
 
       if (!seenTags.has(normalizedTag)) {
@@ -824,7 +851,10 @@ export class ContentEngine {
       }
     }
 
-    return normalizedTags;
+    return {
+      tags: normalizedTags,
+      parseError: null,
+    };
   }
 
   private normalizeTagSearchValue(value: string): string {
@@ -1395,6 +1425,7 @@ export class ContentEngine {
   private async createDirectory(absoluteDirectoryPath: string, displayPath: string): Promise<void> {
     try {
       await fs.mkdir(absoluteDirectoryPath);
+      await this.ensureGitkeepFile(absoluteDirectoryPath);
     } catch (error) {
       if (this.isNodeError(error, "EEXIST")) {
         throw new ContentEngineError("conflict", `Path '${displayPath}' already exists.`);
@@ -1402,6 +1433,28 @@ export class ContentEngine {
 
       throw error;
     }
+  }
+
+  private async ensureGitkeepFile(absoluteDirectoryPath: string): Promise<void> {
+    try {
+      await fs.writeFile(path.join(absoluteDirectoryPath, GITKEEP_FILE_NAME), "", {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (this.isNodeError(error, "EEXIST")) {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async ensureGitkeepForLocation(location: ContentLocation): Promise<void> {
+    const absoluteDirectoryPath = location.subtopicName
+      ? this.resolveInsideDataRoot(location.topicName, location.subtopicName)
+      : this.resolveInsideDataRoot(location.topicName);
+    await this.ensureGitkeepFile(absoluteDirectoryPath);
   }
 
   private async writeNewFile(

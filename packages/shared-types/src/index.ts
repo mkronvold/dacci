@@ -8,6 +8,7 @@ export interface ContentDocumentSummary {
   topicName: string;
   subtopicName?: string;
   tags: ContentTag[];
+  parseError?: string | null;
   modifiedAt: string;
   size: number;
 }
@@ -246,6 +247,8 @@ export interface GitSyncStatus {
 
 export interface GitSyncPushRequest {
   message: string;
+  commitAuthorName?: string;
+  commitAuthorEmail?: string;
 }
 
 export interface GitSyncScheduleConfigureRequest {
@@ -305,6 +308,8 @@ export interface LibraryRepoDefinition {
 
 export interface SavedLibraryRepoDefinition extends LibraryRepoDefinition {
   source?: "configured" | "discovered" | "saved";
+  commitAuthorName?: string;
+  commitAuthorEmail?: string;
 }
 
 export interface DefaultRepoSelection {
@@ -339,6 +344,7 @@ export interface ApiInfoResponse {
   service: string;
   endpoints: string[];
   configuredRepo: RepoContextSummary | null;
+  capabilities: ApiCapabilities;
 }
 
 export interface ApiErrorResponse {
@@ -346,8 +352,42 @@ export interface ApiErrorResponse {
   message: string;
 }
 
+export interface ApiCapabilities {
+  ghCliAvailable: boolean;
+  ghCliVersion?: string;
+}
+
 export interface LibraryRepoTestRequest {
   repo: LibraryRepoDefinition;
+}
+
+export interface LibraryRepoOnboardingDefinition {
+  id: string;
+  name: string;
+  releaseBranch: string;
+}
+
+export const libraryRepoCreateVisibilities = ["private", "public", "internal"] as const;
+
+export type LibraryRepoCreateVisibility = (typeof libraryRepoCreateVisibilities)[number];
+
+export interface LibraryRepoCreateRequest {
+  repo: LibraryRepoOnboardingDefinition;
+  githubOwner: string;
+  githubRepo: string;
+  githubUsername: string;
+  visibility: LibraryRepoCreateVisibility;
+  sshHostAlias?: string;
+  commitAuthorName: string;
+  commitAuthorEmail: string;
+}
+
+export interface LibraryRepoRemoteAdoptRequest {
+  repo: LibraryRepoOnboardingDefinition;
+  githubOwner: string;
+  githubRepo: string;
+  githubUsername: string;
+  sshHostAlias?: string;
 }
 
 export interface LibraryRepoTestResponse {

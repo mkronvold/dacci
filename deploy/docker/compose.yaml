@@ -3,6 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/api.Dockerfile
+    user: "${DACCI_HOST_UID:-0}:${DACCI_HOST_GID:-0}"
     environment:
       HOST: 0.0.0.0
       PORT: 3000
@@ -10,6 +11,9 @@ services:
       GIT_SYNC_REPO_ROOT: ${DACCI_RUNTIME_GIT_SYNC_REPO_ROOT:-}
       GIT_SYNC_REMOTE_URL: ${GIT_SYNC_REMOTE_URL:-}
       DACCI_LIBRARY_ROOTS: ${DACCI_LIBRARY_ROOTS:-/workspace}
+      HOME: ${DACCI_RUNTIME_HOME:-/tmp/dacci-home}
+      DACCI_RUNTIME_SSH_STAGE_DIR: ${DACCI_RUNTIME_SSH_STAGE_DIR:-/var/run/dacci-host-ssh-stage}
+      DACCI_RUNTIME_SSH_SOURCE_DIR: ${DACCI_RUNTIME_SSH_SOURCE_DIR:-/var/run/dacci-host-ssh-live}
       SSH_AUTH_SOCK: ${DACCI_SSH_AUTH_SOCK:-}
     ports:
       - "127.0.0.1:3000:3000"
@@ -22,8 +26,12 @@ services:
         source: ${DACCI_CONTENT_ROOT:-../../workspace/.dacci-empty-content}/data
         target: /workspace/${DACCI_CONTENT_REPO_NAME:-.dacci-empty-content}/data
       - type: bind
-        source: ${DACCI_HOST_SSH_DIR:-./git-ssh}
-        target: /var/run/dacci-host-ssh
+        source: ${DACCI_HOST_SSH_STAGE_DIR:-./git-ssh}
+        target: ${DACCI_RUNTIME_SSH_STAGE_DIR:-/var/run/dacci-host-ssh-stage}
+        read_only: true
+      - type: bind
+        source: ${DACCI_HOST_SSH_SOURCE_DIR:-./git-ssh}
+        target: ${DACCI_RUNTIME_SSH_SOURCE_DIR:-/var/run/dacci-host-ssh-live}
         read_only: true
       - type: bind
         source: ${DACCI_SSH_AUTH_SOCK_DIR:-/tmp/dacci-empty-ssh-agent}
@@ -46,9 +54,11 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/web.Dockerfile
+    user: "${DACCI_HOST_UID:-0}:${DACCI_HOST_GID:-0}"
     environment:
       HOST: 0.0.0.0
       PORT: 4173
+      HOME: ${DACCI_RUNTIME_HOME:-/tmp/dacci-home}
       WEB_API_BASE_URL: http://127.0.0.1:3000
     depends_on:
       api:

@@ -32,7 +32,7 @@ npm install
 npm run dev
 ```
 
-Local defaults scan `./workspace` and use the first discovered content repo as the compatibility default when one exists. If `workspace/` is empty, the API and Web UI still start so the browser can guide you to add or clone a repo.
+Local defaults scan `./workspace` and use the first discovered content repo as the compatibility default when one exists. If `workspace/` is empty, the API and Web UI still start so the browser can guide you to adopt a local checkout, adopt a remote GitHub-backed repo into the workspace, or create a new GitHub-backed repo when `gh` is available to the API runtime.
 
 To point the native runtime at a repo outside `workspace/`, set both runtime paths explicitly:
 
@@ -61,14 +61,40 @@ npm test
 | Task | Command |
 | --- | --- |
 | Start API + Web UI | `npm run dev` |
-| Show CLI help | `npm run cli -- --help` |
-| List the content tree | `npm run cli -- tree` |
-| Search content | `npm run cli -- search release` |
-| Search by tag | `npm run cli -- search tag:release-notes` |
-| Show sync status | `npm run cli -- sync status` |
-| Show sync status against an explicitly configured content checkout | `DATA_ROOT=/srv/E2Open.KPE.Content/data GIT_SYNC_REPO_ROOT=/srv/E2Open.KPE.Content npm run cli -- sync status` |
-| Enable background pull scheduling | `npm run cli -- sync schedule configure --enable --interval-minutes 15` |
+| Show CLI help | `./scripts/dacci-cli --help` |
+| List the content tree | `./scripts/dacci-cli tree` |
+| Search content | `./scripts/dacci-cli search release` |
+| Search by tag | `./scripts/dacci-cli search tag:release-notes` |
+| Show sync status | `./scripts/dacci-cli sync status` |
+| Show sync status against an explicitly configured content checkout | `DATA_ROOT=/srv/E2Open.KPE.Content/data GIT_SYNC_REPO_ROOT=/srv/E2Open.KPE.Content ./scripts/dacci-cli sync status` |
+| Enable background pull scheduling | `./scripts/dacci-cli sync schedule configure --enable --interval-minutes 15` |
 | Validate Docker Compose config | `npm run docker:config` |
+
+`./scripts/dacci-cli` is a thin Bash wrapper around the existing CLI build-and-run path, so you can use the CLI without typing `npm run cli -- ...` each time.
+
+## Choosing the CLI vs the Web UI
+
+The Web UI is the better fit when a person is reading, editing, browsing structure, or visually verifying rendered Markdown, Mermaid, tags, and theme behavior.
+
+The CLI is the better fit when the workflow needs to be scripted, repeated, run headlessly, or composed with shell tooling. That includes:
+
+- scheduled sync and maintenance tasks
+- bulk import and export flows
+- remote operator actions over SSH
+- CI or cron-driven publishing
+- generated status and lifecycle updates from external systems
+
+For other projects, the most useful automation pattern is not "make Dacci the source system." Keep the external tool authoritative, generate Markdown or import bundles from it, and use the CLI to publish curated documentation into the Git-backed workspace.
+
+This works especially well for long-running operational views such as:
+
+- maintenance windows and rollout tracking
+- lifecycle and migration programs
+- release readiness summaries
+- environment status and checklist rollups
+- incident timelines and recovery notes
+
+It is a good fit for periodic refreshes such as every few minutes, hourly, or daily. It is not meant to replace second-by-second dashboards; for true real-time telemetry, keep using observability tooling and link to it from the generated documents.
 
 ## Content model
 
@@ -84,6 +110,7 @@ Storage notes:
 - all user content lives under a Git-backed repo such as `workspace/E2Open.KPE.Content/data`
 - topic-level documents are normalized internally through `CatchAll`
 - the UI and API expose logical paths, not the internal `CatchAll` directory
+- newly created empty topics and subtopics include a `.gitkeep` placeholder so Git can retain them before documents exist
 - documents can be plain Markdown notes or richer documents with headings, Mermaid diagrams, and optional tags
 
 ## Current feature set
@@ -106,6 +133,7 @@ Key endpoints:
 | --- | --- |
 | Service | `GET /health`, `GET /ready`, `GET /api` |
 | Discovery | `GET /api/tree`, `GET /api/summary`, `GET /api/search` |
+| Library | `GET /api/library/discover`, `POST /api/library/test`, `POST /api/library/adopt-remote`, `POST /api/library/create` |
 | Documents | `GET /api/documents`, `POST /api/documents`, `PUT /api/documents` |
 | Structure | topic and subtopic create, rename, and delete routes |
 | Transfer | `POST /api/import/documents`, `POST /api/export` |
@@ -126,9 +154,14 @@ See `apps/api/src/app.ts` for the exact route definitions and `docs/OPERATORS.md
 The active packaged-runtime target is a localhost-only Docker stack that uses normal SSH Git access:
 
 - `./scripts/up` binds the API and web ports to localhost only
-- the API container mounts the host SSH directory read-only at `/root/.ssh`
+- `./scripts/up` passes the host UID/GID into both containers so workspace writes keep host ownership instead of landing as `root:root`
+- the API container mounts a live read-only host SSH directory at `/var/run/dacci-host-ssh-live` plus a staged fallback snapshot at `/var/run/dacci-host-ssh-stage`, refreshes `${HOME}/.ssh` from the live mount when available, preserves Dacci-managed aliases in `.dacci-generated.conf`, and exports a runtime `GIT_SSH_COMMAND`
 - if `SSH_AUTH_SOCK` is set when you start the stack, Dacci forwards that agent socket into the API container too
-- the browser does not connect GitHub, upload SSH keys, or store per-repo GitHub usernames
+- the browser `Adopt Remote Repository` flow clones an existing GitHub-backed repo into the configured workspace root without depending on `gh`
+- the browser `Create Repository` flow depends on `gh` being available to the API runtime; the packaged Docker API image includes it
+- remote adopt and create both use a GitHub username plus an SSH host alias, default the alias from that username, refresh runtime SSH state automatically during onboarding, and can insert a missing alias into the Dacci-managed SSH include
+- per-repo commit name and email live in browser-local repo settings, not `.git/config`, and Dacci injects them only for create and sync commits that it authors
+- the browser does not connect GitHub, upload SSH keys, or store Git credentials
 - pull, push, and refresh use the same SSH remotes and host SSH setup that already work on your machine
 
 Before using the packaged runtime, make sure the host content checkout can already talk to its remote with normal SSH Git commands. See `docs/DOCKER.md` and `docs/OPERATORS.md` for the runtime details.
@@ -139,6 +172,8 @@ Before using the packaged runtime, make sure the host content checkout can alrea
 | --- | --- |
 | `docs/DESIGN.md` | Why the UI is shaped the way it is |
 | `docs/ARCHITECTURE.md` | Why the runtime is split into its current layers and deployment model |
+| `docs/AUTOMATION-ADOPTION.md` | How to adopt CLI-driven automation and periodic status publishing in another repo |
+| `docs/CLI.md` | How to use the CLI for operator workflows, imports, sync, and scheduled publishing |
 | `docs/DOCKER.md` | What to do to run the packaged Docker runtime |
 | `docs/KUBERNETES.md` | Archived Kubernetes package reference retained for historical context during the local-Docker rescope |
 | `docs/OPERATORS.md` | What operators need to know about sync, runtime assumptions, and deployment behavior |
@@ -157,7 +192,9 @@ Before using the packaged runtime, make sure the host content checkout can alrea
 │   ├── docker/
 │   └── k8s/
 ├── docs/
+│   ├── AUTOMATION-ADOPTION.md
 │   ├── ARCHITECTURE.md
+│   ├── CLI.md
 │   ├── DESIGN.md
 │   ├── DOCKER.md
 │   ├── KUBERNETES.md

@@ -221,6 +221,7 @@ export class GitHubSync {
     if (!commitMessage) {
       throw new GitHubSyncError("invalid_configuration", "A sync commit message is required.");
     }
+    const commitIdentity = this.normalizeCommitIdentity(request);
 
     const context = await this.getRepositoryContext();
     await this.fetchRemote(context);
@@ -233,14 +234,14 @@ export class GitHubSync {
     }
 
     if (beforeStatus.nonContentCommittedFiles.length > 0) {
-      return this.pushContentWhileKeepingLocalNonContent(context, commitMessage);
+      return this.pushContentWhileKeepingLocalNonContent(context, commitMessage, commitIdentity);
     }
 
     let commitSha: string | undefined;
     if (beforeStatus.hasContentChanges) {
       await this.runGit(["add", "-A", "--", context.contentPath], { cwd: context.repoRoot });
       if (await this.hasCachedContentChanges(context)) {
-        await this.runGit(["commit", "-m", commitMessage, "--only", "--", context.contentPath], {
+        await this.runGit(this.buildCommitArgs(["commit", "-m", commitMessage, "--only", "--", context.contentPath], commitIdentity), {
           cwd: context.repoRoot,
         });
         commitSha = await this.readFirstLine(["rev-parse", "HEAD"], context.repoRoot);
@@ -274,6 +275,7 @@ export class GitHubSync {
   private async pushContentWhileKeepingLocalNonContent(
     context: RepositoryContext,
     commitMessage: string,
+    commitIdentity: { commitAuthorName: string; commitAuthorEmail: string } | null,
   ): Promise<GitSyncOperationResponse> {
     if (!context.upstreamBranch) {
       throw new GitHubSyncError(
@@ -299,7 +301,7 @@ export class GitHubSync {
 
     let removeBackupRef = false;
     try {
-      const contentCommitSha = await this.createContentOnlyPushCommit(context, commitMessage);
+      const contentCommitSha = await this.createContentOnlyPushCommit(context, commitMessage, commitIdentity);
       if (!contentCommitSha) {
         const status = await this.getStatusInternal({ refreshRemote: false });
         removeBackupRef = true;
@@ -323,7 +325,7 @@ export class GitHubSync {
         cwd: context.repoRoot,
         conflictMessage: "Resetting the local branch after a content-only push failed.",
       });
-      await this.replayLocalNonContentCommits(context, localCommitShas);
+      await this.replayLocalNonContentCommits(context, localCommitShas, commitIdentity);
       await this.applyPatchIfPresent(context.repoRoot, stagedNonContentPatch, {
         applyToIndex: true,
         conflictMessage: "Restoring staged non-content changes after a content-only push failed.",
@@ -358,6 +360,7 @@ export class GitHubSync {
   private async createContentOnlyPushCommit(
     context: RepositoryContext,
     commitMessage: string,
+    commitIdentity: { commitAuthorName: string; commitAuthorEmail: string } | null,
   ): Promise<string | null> {
     if (!context.upstreamBranch) {
       throw new GitHubSyncError(
@@ -386,7 +389,7 @@ export class GitHubSync {
       await this.runGit(["add", "-A", "--", context.contentPath], {
         cwd: tempWorktree,
       });
-      await this.runGit(["commit", "-m", commitMessage, "--only", "--", context.contentPath], {
+      await this.runGit(this.buildCommitArgs(["commit", "-m", commitMessage, "--only", "--", context.contentPath], commitIdentity), {
         cwd: tempWorktree,
         conflictMessage: "Creating a content-only sync commit failed.",
       });
@@ -406,6 +409,7 @@ export class GitHubSync {
   private async replayLocalNonContentCommits(
     context: RepositoryContext,
     localCommitShas: string[],
+    commitIdentity: { commitAuthorName: string; commitAuthorEmail: string } | null,
   ): Promise<void> {
     for (const commitSha of localCommitShas) {
       const patch = await this.readStdout(
@@ -420,7 +424,7 @@ export class GitHubSync {
         applyToIndex: true,
         conflictMessage: "Replaying local non-content commits after a content-only push failed.",
       });
-      await this.runGit(["commit", "--reuse-message", commitSha], {
+      await this.runGit(this.buildCommitArgs(["commit", "--reuse-message", commitSha], commitIdentity), {
         cwd: context.repoRoot,
         conflictMessage: "Recreating a local non-content commit after a content-only push failed.",
       });
@@ -441,6 +445,46 @@ export class GitHubSync {
 
   private buildNonContentPathspec(contentPath: string): string[] {
     return ["--", ".", `:(exclude)${contentPath}`];
+  }
+
+  private normalizeCommitIdentity(
+    request: GitSyncPushRequest,
+  ): { commitAuthorName: string; commitAuthorEmail: string } | null {
+    const commitAuthorName = request.commitAuthorName?.trim() ?? "";
+    const commitAuthorEmail = request.commitAuthorEmail?.trim() ?? "";
+
+    if (!commitAuthorName && !commitAuthorEmail) {
+      return null;
+    }
+
+    if (!commitAuthorName || !commitAuthorEmail) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        "Sync commit identity requires both commitAuthorName and commitAuthorEmail when either value is provided.",
+      );
+    }
+
+    return {
+      commitAuthorName,
+      commitAuthorEmail,
+    };
+  }
+
+  private buildCommitArgs(
+    args: string[],
+    commitIdentity: { commitAuthorName: string; commitAuthorEmail: string } | null,
+  ): string[] {
+    if (!commitIdentity) {
+      return args;
+    }
+
+    return [
+      "-c",
+      `user.name=${commitIdentity.commitAuthorName}`,
+      "-c",
+      `user.email=${commitIdentity.commitAuthorEmail}`,
+      ...args,
+    ];
   }
 
   private async applyPatchIfPresent(
