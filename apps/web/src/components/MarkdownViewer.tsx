@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 
+import type { ThemeName } from "../utils/theme";
 import { MermaidBlock } from "./MermaidBlock";
 import {
   extractFrontMatterBlock,
@@ -19,6 +20,7 @@ import {
 interface MarkdownViewerProps {
   markdown: string;
   showFrontMatter: boolean;
+  themeName?: ThemeName;
 }
 
 type HeadingTag = "h1" | "h2" | "h3" | "h4" | "h5" | "h6";

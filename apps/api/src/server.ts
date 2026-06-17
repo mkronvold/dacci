@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildApp, type BuildAppOptions, validateAppRuntimeConfiguration } from "./app.js";
-import { parseConfiguredLibraryRoots } from "./repoContext.js";
+import { parseGitHubTeamRoleBindings, parseRepoRoleOverrides } from "./githubDeviceAuth.js";
+import { parseConfiguredLibraryRepos, parseConfiguredLibraryRoots } from "./repoContext.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRepoRoot = path.resolve(__dirname, "../../..");
@@ -18,9 +19,13 @@ const gitSyncRemoteName = process.env.GIT_SYNC_REMOTE_NAME ?? "origin";
 const gitSyncRemoteUrl = process.env.GIT_SYNC_REMOTE_URL;
 const gitSshCommand = process.env.GIT_SSH_COMMAND;
 const gitSyncReleaseBranch = process.env.GIT_SYNC_RELEASE_BRANCH ?? "default";
+const libraryRepos = parseConfiguredLibraryRepos(process.env.DACCI_LIBRARY_REPOS);
 const libraryRepoRoots = process.env.DACCI_LIBRARY_ROOTS?.trim()
   ? parseConfiguredLibraryRoots(undefined, process.env.DACCI_LIBRARY_ROOTS)
   : buildDefaultLibraryRoots(defaultWorkspaceRoot, gitSyncRepoRoot);
+const gitHubDeviceClientId = process.env.DACCI_GITHUB_DEVICE_CLIENT_ID;
+const gitHubTeamRoleBindings = parseGitHubTeamRoleBindings(process.env.DACCI_GITHUB_TEAM_ROLE_BINDINGS);
+const gitHubRepoRoleOverrides = parseRepoRoleOverrides(process.env.DACCI_GITHUB_REPO_ROLE_OVERRIDES);
 const port = parsePort(process.env.PORT ?? "3000", 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 
@@ -40,6 +45,18 @@ if (gitSshCommand) {
 }
 if (libraryRepoRoots.length > 0) {
   appOptions.libraryRepoRoots = libraryRepoRoots;
+}
+if (libraryRepos.length > 0) {
+  appOptions.libraryRepos = libraryRepos;
+}
+if (gitHubDeviceClientId?.trim()) {
+  appOptions.gitHubDeviceClientId = gitHubDeviceClientId;
+}
+if (gitHubTeamRoleBindings.length > 0) {
+  appOptions.gitHubTeamRoleBindings = gitHubTeamRoleBindings;
+}
+if (gitHubRepoRoleOverrides.length > 0) {
+  appOptions.gitHubRepoRoleOverrides = gitHubRepoRoleOverrides;
 }
 
 let shuttingDown = false;
@@ -79,7 +96,11 @@ try {
       gitSyncRemoteName,
       gitSyncRemoteUrl,
       gitSyncReleaseBranch,
+      libraryRepos,
       libraryRepoRoots,
+      gitHubDeviceClientId,
+      gitHubTeamRoleBindings,
+      gitHubRepoRoleOverrides,
     },
     "API runtime started",
   );

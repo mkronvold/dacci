@@ -120,7 +120,7 @@ export function ManagementPane(props: ManagementPaneProps) {
   const hasMoreSelectedImports = selectedImportPaths.length > 3;
   const selectedThemeDescription =
     themeOptions.find((option) => option.value === props.currentTheme)?.description ??
-    "The current blue/slate Dacci palette.";
+    "Matches the Material for MkDocs palette used by ProperDocs.";
 
   return (
     <aside className="panel management-pane open">

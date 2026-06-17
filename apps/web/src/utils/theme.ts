@@ -1,4 +1,4 @@
-export type ThemeName = "blue" | "green" | "dark" | "earth" | "black-tan" | "tan-black";
+export type ThemeName = "default" | "slate";
 
 export type ThemeOption = {
   value: ThemeName;
@@ -6,60 +6,49 @@ export type ThemeOption = {
   description: string;
 };
 
-export const defaultThemeName: ThemeName = "blue";
+export const defaultThemeName: ThemeName = "default";
 const legacyThemeStorageKey = "dacci.ui.theme";
 export const themeStorageKey = "dacci.ui.theme.v2";
+const scopedThemeStorageKeyPrefix = `${themeStorageKey}.scoped`;
 
 export const themeOptions: ThemeOption[] = [
   {
-    value: "blue",
-    label: "Blue",
-    description: "The current blue/slate Dacci palette.",
+    value: "default",
+    label: "Material light",
+    description: "Matches the default Material for MkDocs light palette used by ProperDocs.",
   },
   {
-    value: "green",
-    label: "Green",
-    description: "A forest-green variant with similar darkness and contrast to blue.",
-  },
-  {
-    value: "dark",
-    label: "Dark",
-    description: "A cooler neutral dark theme with lower chroma.",
-  },
-  {
-    value: "earth",
-    label: "Earth",
-    description: "A warm deep-grey palette with clay and tan accents.",
-  },
-  {
-    value: "black-tan",
-    label: "Black and tan",
-    description: "A high-contrast theme with near-black panels and a tan backdrop.",
-  },
-  {
-    value: "tan-black",
-    label: "Tan and black",
-    description: "An inverted black-and-tan palette with ink-dark backgrounds and tan panels.",
+    value: "slate",
+    label: "Material slate",
+    description: "Matches the slate Material for MkDocs dark palette used by ProperDocs.",
   },
 ];
 
 export function isThemeName(value: unknown): value is ThemeName {
-  return (
-    value === "blue" ||
-    value === "green" ||
-    value === "dark" ||
-    value === "earth" ||
-    value === "black-tan" ||
-    value === "tan-black"
-  );
+  return value === "default" || value === "slate";
 }
 
 function readLegacyThemeName(rawValue: string | null): ThemeName | null {
-  if (rawValue === "black-tan") {
-    return "earth";
+  if (
+    rawValue === "blue" ||
+    rawValue === "green" ||
+    rawValue === "dark" ||
+    rawValue === "earth" ||
+    rawValue === "black-tan" ||
+    rawValue === "tan-black"
+  ) {
+    return "slate";
   }
 
   return isThemeName(rawValue) ? rawValue : null;
+}
+
+function readSystemThemeName(): ThemeName {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return defaultThemeName;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "slate" : "default";
 }
 
 export function readPersistedThemeName(): ThemeName {
@@ -73,19 +62,47 @@ export function readPersistedThemeName(): ThemeName {
       return persistedValue;
     }
 
-    return readLegacyThemeName(window.localStorage.getItem(legacyThemeStorageKey)) ?? defaultThemeName;
+    return readLegacyThemeName(window.localStorage.getItem(legacyThemeStorageKey)) ?? readSystemThemeName();
   } catch (error) {
     console.warn("Failed to read saved theme from localStorage.", error);
-    return defaultThemeName;
+    return readSystemThemeName();
   }
 }
 
-export function writePersistedThemeName(themeName: ThemeName): void {
+function buildScopedThemeStorageKey(scopeId: string): string {
+  return `${scopedThemeStorageKeyPrefix}:${scopeId}`;
+}
+
+export function readPersistedScopedThemeName(scopeId: string): ThemeName | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const normalizedScopeId = scopeId.trim();
+  if (!normalizedScopeId) {
+    return null;
+  }
+
+  try {
+    const persistedValue = window.localStorage.getItem(buildScopedThemeStorageKey(normalizedScopeId));
+    return isThemeName(persistedValue) ? persistedValue : null;
+  } catch (error) {
+    console.warn("Failed to read saved scoped theme from localStorage.", error);
+    return null;
+  }
+}
+
+export function writePersistedThemeName(themeName: ThemeName, scopeId?: string): void {
   if (typeof window === "undefined") {
     return;
   }
 
   try {
+    if (scopeId?.trim()) {
+      window.localStorage.setItem(buildScopedThemeStorageKey(scopeId.trim()), themeName);
+      return;
+    }
+
     window.localStorage.setItem(themeStorageKey, themeName);
     window.localStorage.removeItem(legacyThemeStorageKey);
   } catch (error) {
@@ -112,5 +129,5 @@ export function readActiveThemeName(): ThemeName {
   }
 
   const documentThemeName = document.documentElement.dataset.theme;
-  return isThemeName(documentThemeName) ? documentThemeName : defaultThemeName;
+  return isThemeName(documentThemeName) ? documentThemeName : readPersistedThemeName();
 }

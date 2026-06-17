@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { configuredRepoId, repoSelectionHeaderName } from "@dacci/shared-types";
+import { configuredRepoId } from "@dacci/shared-types";
 import type {
   LibraryRepoCreateRequest,
   LibraryRepoRemoteAdoptRequest,
@@ -44,6 +44,7 @@ import type {
 } from "@dacci/shared-types";
 
 import { DocumentEditor } from "./components/DocumentEditor";
+import { DocsWorkspacePane } from "./components/DocsWorkspacePane";
 import { DocumentOutlinePane } from "./components/DocumentOutlinePane";
 import { LibraryPane } from "./components/LibraryPane";
 import { ManagementPane } from "./components/ManagementPane";
@@ -62,7 +63,6 @@ import {
 import {
   buildRepoSelection,
   createDiscoveredLibraryRepo,
-  encodeRepoSelectionHeaderValue,
   filterBrowserSavedLibraryRepos,
   findSavedLibraryRepo,
   isConfiguredLibraryRepo,
@@ -71,6 +71,7 @@ import {
   toLibraryRepoDefinition,
   writePersistedLibraryState,
 } from "./utils/libraryRepos";
+import { requestApi, requestApiNoContent } from "./utils/api";
 import {
   applyThemeName,
   readPersistedScopedThemeName,
@@ -87,10 +88,6 @@ const uiToggleStateStorageKeyPrefix = "dacci.ui.toggles";
 interface AppProps {
   apiBaseUrl?: string;
 }
-
-type RequestRepoContext = {
-  repoSelection?: RepoSelection;
-};
 
 type TopicFormState = {
   name: string;
@@ -144,7 +141,7 @@ type CommitAuthorFormState = {
 
 type LibraryRepoFormState = CommitAuthorFormState & {
   id: string | null;
-  source: "configured" | "discovered" | "saved" | null;
+  source: "configured" | "registered" | "discovered" | "saved" | null;
   name: string;
   repoRoot: string;
   dataRoot: string;
@@ -437,82 +434,6 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-function buildApiUnavailableMessage(apiBaseUrl: string, resource: string): string {
-  return `Could not complete the browser request to the API at ${apiBaseUrl} while requesting '${resource}'. Confirm 'npm run dev' started the API, that port 3000 is available, and that the API allows this cross-origin request.`;
-}
-
-async function requestApi<T>(
-  apiBaseUrl: string,
-  resource: string,
-  init?: RequestInit,
-  repoContext?: RequestRepoContext,
-): Promise<T> {
-  try {
-    const headers = new Headers(init?.headers);
-    if (repoContext?.repoSelection) {
-      headers.set(repoSelectionHeaderName, encodeRepoSelectionHeaderValue(repoContext.repoSelection));
-    }
-
-    const response = await fetch(buildApiUrl(apiBaseUrl, resource), {
-      ...init,
-      credentials: "include",
-      headers,
-    });
-    return await parseJsonResponse<T>(response);
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new Error(buildApiUnavailableMessage(apiBaseUrl, resource));
-    }
-
-    throw error;
-  }
-}
-
-async function requestApiNoContent(
-  apiBaseUrl: string,
-  resource: string,
-  init?: RequestInit,
-  repoContext?: RequestRepoContext,
-): Promise<void> {
-  try {
-    const headers = new Headers(init?.headers);
-    if (repoContext?.repoSelection) {
-      headers.set(repoSelectionHeaderName, encodeRepoSelectionHeaderValue(repoContext.repoSelection));
-    }
-
-    const response = await fetch(buildApiUrl(apiBaseUrl, resource), {
-      ...init,
-      credentials: "include",
-      headers,
-    });
-    if (!response.ok) {
-      await parseJsonResponse(response);
-    }
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new Error(buildApiUnavailableMessage(apiBaseUrl, resource));
-    }
-
-    throw error;
-  }
-}
-
-function buildApiUrl(apiBaseUrl: string, resource: string): string {
-  if (!apiBaseUrl) {
-    return resource;
-  }
-
-  if (apiBaseUrl.endsWith("/") && resource.startsWith("/")) {
-    return `${apiBaseUrl.slice(0, -1)}${resource}`;
-  }
-
-  if (!apiBaseUrl.endsWith("/") && !resource.startsWith("/")) {
-    return `${apiBaseUrl}/${resource}`;
-  }
-
-  return `${apiBaseUrl}${resource}`;
-}
-
 export function App(props: AppProps) {
   const apiBaseUrl = props.apiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl;
   const persistedUiToggleState = useMemo(() => readPersistedUiToggleState(apiBaseUrl), [apiBaseUrl]);
@@ -746,6 +667,11 @@ export function App(props: AppProps) {
     libraryEntries[0]?.name ??
     apiInfo?.configuredRepo?.name ??
     "Content repository";
+  const activeRepoId =
+    findSavedLibraryRepo(libraryEntries, selectedRepoId)?.id ??
+    libraryEntries[0]?.id ??
+    apiInfo?.configuredRepo?.id ??
+    configuredRepoId;
   const browserSavedLibraryEntries = useMemo(
     () => filterBrowserSavedLibraryRepos(libraryEntries),
     [libraryEntries],
@@ -1970,8 +1896,8 @@ export function App(props: AppProps) {
         return;
       }
 
-      if (repo.source === "discovered") {
-        setError("Discovered repositories come from the current workspace. Remove the checkout or save your own override instead.");
+      if (repo.source === "discovered" || repo.source === "registered") {
+        setError("Runtime-provided repositories come from the current workspace or repo registry. Remove the checkout or save your own override instead.");
         return;
       }
 
@@ -2391,6 +2317,35 @@ export function App(props: AppProps) {
 
       {error ? <p className="notice error">{error}</p> : null}
       {message ? <p className="notice success">{message}</p> : null}
+
+      {hasActiveRepoSelection ? (
+        <DocsWorkspacePane
+          apiBaseUrl={apiBaseUrl}
+          repoId={activeRepoId}
+          repoLabel={activeRepoLabel}
+          repoSelection={activeRepoSelection}
+          themeName={themeName}
+        />
+      ) : (
+        <section className="panel multiuser-docs-card">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow viewer-eyebrow">Multi-user beta</p>
+              <h2>Status-first docs workspace</h2>
+              <p className="muted">
+                The multi-user docs workspace stays idle until Dacci has a configured or selected content repository.
+              </p>
+            </div>
+          </div>
+          <div className="empty-viewer-state">
+            <h3>No active repository</h3>
+            <p className="muted">
+              Add a repo in the Library panel or start Dacci with a configured content repo before using the new
+              auth-backed docs lifecycle workspace.
+            </p>
+          </div>
+        </section>
+      )}
 
       <section className={workspaceShellClassName}>
         {navigationPaneOpen ? (
@@ -3331,7 +3286,7 @@ function parseImportedLibraryRepo(value: unknown): SavedLibraryRepoDefinition {
   const id = typeof candidate.id === "string" && candidate.id.trim() ? candidate.id.trim() : createLibraryRepoId();
   const dataRoot = typeof candidate.dataRoot === "string" ? candidate.dataRoot.trim() : "";
   const source =
-    candidate.source === "configured" || candidate.source === "discovered" || candidate.source === "saved"
+    candidate.source === "configured" || candidate.source === "registered" || candidate.source === "discovered" || candidate.source === "saved"
       ? candidate.source
       : "saved";
   const releaseBranch = typeof candidate.releaseBranch === "string" ? candidate.releaseBranch.trim() : "";

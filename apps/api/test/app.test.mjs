@@ -11,6 +11,7 @@ import { buildApp, validateAppRuntimeConfiguration } from "../dist/app.js";
 
 const execFileAsync = promisify(execFile);
 const repoSelectionHeaderName = "x-dacci-repo-selection";
+const authSessionHeaderName = "x-dacci-auth-session";
 
 async function createTempDataRoot(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -22,6 +23,9 @@ async function runGit(args, cwd) {
     maxBuffer: 10 * 1024 * 1024,
     env: {
       ...process.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.bareRepository",
+      GIT_CONFIG_VALUE_0: "all",
       GIT_TERMINAL_PROMPT: "0",
     },
   });
@@ -33,6 +37,9 @@ async function readGitStdout(args, cwd) {
     maxBuffer: 10 * 1024 * 1024,
     env: {
       ...process.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.bareRepository",
+      GIT_CONFIG_VALUE_0: "all",
       GIT_TERMINAL_PROMPT: "0",
     },
   });
@@ -59,6 +66,73 @@ async function createGitBackedContentRepo(prefix, files, baseDir) {
   return {
     repoRoot,
     dataRoot,
+  };
+}
+
+async function createGitBackedDocsRepo(prefix, files) {
+  const repoRoot = await createTempDataRoot(prefix);
+  const dataRoot = path.join(repoRoot, "data");
+  await mkdir(dataRoot, { recursive: true });
+
+  for (const file of files) {
+    const absolutePath = path.join(repoRoot, file.path);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, file.body, "utf8");
+  }
+
+  await runGit(["init", "--initial-branch=main"], repoRoot);
+  await runGit(["config", "user.name", "API Docs Test"], repoRoot);
+  await runGit(["config", "user.email", "api-docs@example.com"], repoRoot);
+  await runGit(["add", "."], repoRoot);
+  await runGit(["commit", "-m", "Initial docs content"], repoRoot);
+
+  return {
+    repoRoot,
+    dataRoot,
+  };
+}
+
+function createFakeGitHubDeviceAuthProvider() {
+  return {
+    async startDeviceAuthorization() {
+      return {
+        deviceCode: "device-code-123",
+        userCode: "ABCD-EFGH",
+        verificationUri: "https://github.com/login/device",
+        verificationUriComplete: "https://github.com/login/device?user_code=ABCD-EFGH",
+        expiresInSeconds: 900,
+        intervalSeconds: 5,
+      };
+    },
+    async pollDeviceAuthorization(deviceCode) {
+      if (deviceCode === "pending-code") {
+        return {
+          status: "pending",
+          intervalSeconds: 7,
+        };
+      }
+
+      return {
+        status: "authorized",
+        accessToken: "gho_test_token",
+      };
+    },
+    async getAuthenticatedUser() {
+      return {
+        id: 101,
+        login: "octocat",
+        displayName: "The Octocat",
+        avatarUrl: "https://avatars.example/octocat.png",
+      };
+    },
+    async getTeamMemberships() {
+      return [
+        {
+          org: "who-wtg",
+          slug: "docs-publishers",
+        },
+      ];
+    },
   };
 }
 
@@ -206,6 +280,299 @@ test("api returns 400 when document path is missing", async (t) => {
   });
 });
 
+test("api exposes the new docs tree grouped by status-first lifecycle folders", async (t) => {
+  const { repoRoot, dataRoot } = await createGitBackedDocsRepo("dacci-api-docs-tree-", [
+    {
+      path: "published/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design\n---\n## Published\n",
+    },
+    {
+      path: "draft/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design Draft\n---\n## Draft\n",
+    },
+  ]);
+  const app = await buildApp({ dataRoot, gitSyncRepoRoot: repoRoot });
+
+  t.after(async () => {
+    await app.close();
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/docs/tree",
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.documents.length, 1);
+  assert.deepEqual(body.documents[0].availableStatuses, ["draft", "published"]);
+  assert.equal(body.documents[0].logicalPath, "platform/kubernetes/core-design.md");
+  assert.equal(body.statuses[0].status, "draft");
+  assert.equal(body.statuses[1].status, "published");
+});
+
+test("api supports GitHub device authorization sessions and repo permission evaluation", async (t) => {
+  const defaultRepo = await createGitBackedContentRepo(
+    "dacci-api-auth-default-",
+    [
+      {
+        path: "Default Topic/Guide.md",
+        body: "# Default\n",
+      },
+    ],
+  );
+  const registeredRepo = await createGitBackedContentRepo(
+    "dacci-api-auth-registered-",
+    [
+      {
+        path: "Registered Topic/Guide.md",
+        body: "# Registered\n",
+      },
+    ],
+  );
+  const app = await buildApp({
+    dataRoot: defaultRepo.dataRoot,
+    gitSyncRepoRoot: defaultRepo.repoRoot,
+    libraryRepos: [
+      {
+        id: "registered-docs",
+        name: "Registered Docs",
+        repoRoot: registeredRepo.repoRoot,
+        dataRoot: registeredRepo.dataRoot,
+        releaseBranch: "main",
+      },
+    ],
+    gitHubDeviceAuthProvider: createFakeGitHubDeviceAuthProvider(),
+    gitHubTeamRoleBindings: [
+      {
+        org: "who-wtg",
+        teamSlug: "docs-publishers",
+        repoIds: ["registered-docs"],
+        roles: ["direct-publish"],
+      },
+    ],
+    gitHubRepoRoleOverrides: [
+      {
+        repoId: "configured-repo",
+        login: "octocat",
+        roles: ["manage"],
+        reason: "owner override",
+      },
+    ],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(defaultRepo.repoRoot, { recursive: true, force: true });
+    await rm(registeredRepo.repoRoot, { recursive: true, force: true });
+  });
+
+  const startResponse = await app.inject({
+    method: "POST",
+    url: "/api/auth/github/device/start",
+  });
+  assert.equal(startResponse.statusCode, 200);
+  assert.equal(startResponse.json().deviceCode, "device-code-123");
+
+  const pendingResponse = await app.inject({
+    method: "POST",
+    url: "/api/auth/github/device/poll",
+    payload: {
+      deviceCode: "pending-code",
+    },
+  });
+  assert.equal(pendingResponse.statusCode, 200);
+  assert.deepEqual(pendingResponse.json(), {
+    status: "pending",
+    intervalSeconds: 7,
+  });
+
+  const authorizedResponse = await app.inject({
+    method: "POST",
+    url: "/api/auth/github/device/poll",
+    payload: {
+      deviceCode: "authorized-code",
+    },
+  });
+  assert.equal(authorizedResponse.statusCode, 200);
+  const authorizedBody = authorizedResponse.json();
+  assert.equal(authorizedBody.status, "authorized");
+  assert.equal(authorizedBody.session.user.login, "octocat");
+  assert.equal(authorizedBody.session.permissions.length, 2);
+
+  const configuredRepoPermission = authorizedBody.session.permissions.find((entry) => entry.repoId === "configured-repo");
+  assert.ok(configuredRepoPermission);
+  assert.equal(configuredRepoPermission.canManage, true);
+  assert.equal(configuredRepoPermission.canDirectPublish, true);
+  assert.equal(configuredRepoPermission.sourceOverride, "owner override");
+
+  const registeredRepoPermission = authorizedBody.session.permissions.find((entry) => entry.repoId === "registered-docs");
+  assert.ok(registeredRepoPermission);
+  assert.equal(registeredRepoPermission.canManage, false);
+  assert.equal(registeredRepoPermission.canDirectPublish, true);
+  assert.deepEqual(registeredRepoPermission.sourceTeams, ["who-wtg/docs-publishers"]);
+
+  const sessionId = authorizedBody.session.sessionId;
+  const sessionResponse = await app.inject({
+    method: "GET",
+    url: "/api/auth/session",
+    headers: {
+      [authSessionHeaderName]: sessionId,
+    },
+  });
+  assert.equal(sessionResponse.statusCode, 200);
+  assert.equal(sessionResponse.json().authenticated, true);
+  assert.equal(sessionResponse.json().session.sessionId, sessionId);
+
+  const logoutResponse = await app.inject({
+    method: "POST",
+    url: "/api/auth/session/logout",
+    headers: {
+      [authSessionHeaderName]: sessionId,
+    },
+  });
+  assert.equal(logoutResponse.statusCode, 200);
+  assert.deepEqual(logoutResponse.json(), {
+    authenticated: false,
+  });
+});
+
+test("api requires an authenticated session for docs routes when GitHub auth is enabled", async (t) => {
+  const docsRepo = await createGitBackedDocsRepo("dacci-api-auth-docs-", [
+    {
+      path: "draft/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design Draft\n---\n## Draft\n",
+    },
+  ]);
+  const authProvider = createFakeGitHubDeviceAuthProvider();
+  authProvider.getTeamMemberships = async () => [];
+  const app = await buildApp({
+    dataRoot: docsRepo.dataRoot,
+    gitSyncRepoRoot: docsRepo.repoRoot,
+    gitHubDeviceAuthProvider: authProvider,
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(docsRepo.repoRoot, { recursive: true, force: true });
+  });
+
+  const unauthenticatedTreeResponse = await app.inject({
+    method: "GET",
+    url: "/api/docs/tree",
+  });
+  assert.equal(unauthenticatedTreeResponse.statusCode, 401);
+  assert.equal(unauthenticatedTreeResponse.json().error, "authentication_required");
+
+  const authorizedResponse = await app.inject({
+    method: "POST",
+    url: "/api/auth/github/device/poll",
+    payload: {
+      deviceCode: "authorized-code",
+    },
+  });
+  assert.equal(authorizedResponse.statusCode, 200);
+  const sessionId = authorizedResponse.json().session.sessionId;
+
+  const authenticatedTreeResponse = await app.inject({
+    method: "GET",
+    url: "/api/docs/tree",
+    headers: {
+      [authSessionHeaderName]: sessionId,
+    },
+  });
+  assert.equal(authenticatedTreeResponse.statusCode, 200);
+
+  const publishResponse = await app.inject({
+    method: "POST",
+    url: "/api/docs/documents/publish",
+    headers: {
+      [authSessionHeaderName]: sessionId,
+    },
+    payload: {
+      logicalPath: "platform/kubernetes/core-design.md",
+    },
+  });
+  assert.equal(publishResponse.statusCode, 403);
+  assert.equal(publishResponse.json().error, "forbidden");
+});
+
+test("api publishes a draft into the published status folder and removes the draft variant", async (t) => {
+  const { repoRoot, dataRoot } = await createGitBackedDocsRepo("dacci-api-docs-publish-", [
+    {
+      path: "published/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design\n---\n## Published\n",
+    },
+    {
+      path: "draft/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design Draft\n---\n## Replacement\n",
+    },
+  ]);
+  const app = await buildApp({ dataRoot, gitSyncRepoRoot: repoRoot });
+
+  t.after(async () => {
+    await app.close();
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const publishResponse = await app.inject({
+    method: "POST",
+    url: "/api/docs/documents/publish",
+    payload: {
+      logicalPath: "platform/kubernetes/core-design.md",
+    },
+  });
+
+  assert.equal(publishResponse.statusCode, 200);
+  assert.equal(publishResponse.json().status, "published");
+
+  const publishedDocumentResponse = await app.inject({
+    method: "GET",
+    url: "/api/docs/documents?status=published&path=platform/kubernetes/core-design.md",
+  });
+
+  assert.equal(publishedDocumentResponse.statusCode, 200);
+  assert.match(publishedDocumentResponse.json().body, /Replacement/);
+
+  const treeResponse = await app.inject({
+    method: "GET",
+    url: "/api/docs/tree",
+  });
+
+  assert.equal(treeResponse.statusCode, 200);
+  assert.deepEqual(treeResponse.json().documents[0].availableStatuses, ["published"]);
+});
+
+test("api rejects stale docs draft saves with a conflict response", async (t) => {
+  const { repoRoot, dataRoot } = await createGitBackedDocsRepo("dacci-api-docs-stale-draft-", [
+    {
+      path: "draft/platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design Draft\n---\n## Draft\n",
+    },
+  ]);
+  const app = await buildApp({ dataRoot, gitSyncRepoRoot: repoRoot });
+
+  t.after(async () => {
+    await app.close();
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "PUT",
+    url: "/api/docs/documents/draft",
+    payload: {
+      logicalPath: "platform/kubernetes/core-design.md",
+      body: "---\ntitle: Core Design Draft\n---\n## Replacement\n",
+      expectedModifiedAt: "1970-01-01T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.json().error, "conflict");
+  assert.match(response.json().message, /changed after it was loaded/i);
+});
+
 test("api advertises the phase 12 runtime endpoints", async (t) => {
   await installFakeGh(t, {
     versionLine: "gh version 2.99.0-test",
@@ -313,13 +680,76 @@ test("api discovers configured and sibling workspace repos", async (t) => {
   assert.ok(defaultSummary);
   assert.equal(defaultSummary.id, "configured-repo");
   assert.equal(defaultSummary.kind, "default");
+  assert.equal(defaultSummary.source, "configured");
   assert.equal(defaultSummary.dataRoot, defaultRepo.dataRoot);
 
   const librarySummary = body.repos.find((repo) => repo.repoRoot === libraryRepo.repoRoot);
   assert.ok(librarySummary);
   assert.equal(librarySummary.kind, "library");
+  assert.equal(librarySummary.source, "discovered");
   assert.equal(librarySummary.dataRoot, libraryRepo.dataRoot);
   assert.match(librarySummary.id, /^discovered-[0-9a-f]{12}$/);
+});
+
+test("api discovers and serves registered library repos without relying on workspace scanning", async (t) => {
+  const registeredRepo = await createGitBackedContentRepo(
+    "registered-content-",
+    [
+      {
+        path: "Registered Topic/Guide.md",
+        body: "# Registered\n",
+      },
+    ],
+  );
+  const app = await buildApp({
+    libraryRepos: [
+      {
+        id: "registered-content",
+        name: "Registered Content",
+        repoRoot: registeredRepo.repoRoot,
+        dataRoot: registeredRepo.dataRoot,
+        releaseBranch: "main",
+      },
+    ],
+  });
+
+  t.after(async () => {
+    await app.close();
+    await rm(registeredRepo.repoRoot, { recursive: true, force: true });
+  });
+
+  const [discoverResponse, treeResponse] = await Promise.all([
+    app.inject({
+      method: "GET",
+      url: "/api/library/discover",
+    }),
+    app.inject({
+      method: "GET",
+      url: "/api/tree",
+      headers: {
+        [repoSelectionHeaderName]: createLibrarySelectionHeader({
+          id: "registered-content",
+          name: "Registered Content",
+          repoRoot: registeredRepo.repoRoot,
+          dataRoot: registeredRepo.dataRoot,
+          releaseBranch: "main",
+        }),
+      },
+    }),
+  ]);
+
+  assert.equal(discoverResponse.statusCode, 200);
+  const discoveryBody = discoverResponse.json();
+  assert.deepEqual(discoveryBody.libraryRoots, []);
+  assert.equal(discoveryBody.repos.length, 1);
+  assert.equal(discoveryBody.repos[0].id, "registered-content");
+  assert.equal(discoveryBody.repos[0].source, "registered");
+  assert.equal(discoveryBody.repos[0].repoRoot, registeredRepo.repoRoot);
+
+  assert.equal(treeResponse.statusCode, 200);
+  const treeBody = treeResponse.json();
+  assert.equal(treeBody.topics.length, 1);
+  assert.equal(treeBody.topics[0].name, "Registered Topic");
 });
 
 test("api creates and bootstraps a new personal library repo when GitHub owner is blank", async (t) => {
@@ -1128,7 +1558,7 @@ test("api rejects library repo selections outside configured library roots", asy
   });
 
   assert.equal(response.statusCode, 400);
-  assert.match(response.json().message, /outside the configured library roots/i);
+  assert.match(response.json().message, /outside the configured library (registry and allowed roots|roots)/i);
 });
 
 test("api exposes tag-aware search results and document tags", async (t) => {

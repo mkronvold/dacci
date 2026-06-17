@@ -17,6 +17,106 @@ export interface ContentDocument extends ContentDocumentSummary {
   body: string;
 }
 
+export const docsStatuses = ["draft", "published", "archive"] as const;
+
+export type DocsStatus = (typeof docsStatuses)[number];
+
+export interface DocsDocumentVariantSummary {
+  status: DocsStatus;
+  repoPath: string;
+  modifiedAt: string;
+  size: number;
+}
+
+export interface DocsLogicalDocumentSummary {
+  kind: "logical-document";
+  id: string;
+  name: string;
+  slug: string;
+  logicalPath: string;
+  layer: string;
+  domainPath: string;
+  title?: string;
+  tags: ContentTag[];
+  parseError?: string | null;
+  availableStatuses: DocsStatus[];
+  variants: DocsDocumentVariantSummary[];
+}
+
+export interface DocsDocumentVariant extends DocsDocumentVariantSummary {
+  logicalPath: string;
+  name: string;
+  slug: string;
+  layer: string;
+  domainPath: string;
+  title?: string;
+  tags: ContentTag[];
+  parseError?: string | null;
+  body: string;
+}
+
+export interface DocsDomainNode {
+  kind: "domain";
+  name: string;
+  path: string;
+  documents: DocsLogicalDocumentSummary[];
+}
+
+export interface DocsLayerNode {
+  kind: "layer";
+  name: string;
+  path: string;
+  domains: DocsDomainNode[];
+}
+
+export interface DocsStatusNode {
+  kind: "status";
+  status: DocsStatus;
+  path: string;
+  layers: DocsLayerNode[];
+}
+
+export interface DocsTree {
+  generatedAt: string;
+  documents: DocsLogicalDocumentSummary[];
+  statuses: DocsStatusNode[];
+}
+
+export interface CreateDocsDraftInput {
+  layer: string;
+  domainPath: string;
+  name: string;
+  body: string;
+}
+
+export interface UpdateDocsDraftRequest {
+  logicalPath: string;
+  body: string;
+  expectedModifiedAt?: string;
+}
+
+export interface SavePublishedEditRequest {
+  logicalPath: string;
+  body: string;
+  expectedModifiedAt?: string;
+}
+
+export interface PublishDocsDraftRequest {
+  logicalPath: string;
+  expectedModifiedAt?: string;
+}
+
+export interface ArchiveDocsDocumentRequest {
+  logicalPath: string;
+  sourceStatus?: Exclude<DocsStatus, "archive">;
+  expectedModifiedAt?: string;
+}
+
+export interface DeleteArchivedDocsDocumentRequest {
+  logicalPath: string;
+  expectedModifiedAt?: string;
+}
+
 export interface CreateTopicRequest {
   name: string;
 }
@@ -297,6 +397,7 @@ export interface ContentEngineSummary {
 
 export const configuredRepoId = "configured-repo";
 export const repoSelectionHeaderName = "x-dacci-repo-selection";
+export const authSessionHeaderName = "x-dacci-auth-session";
 
 export interface LibraryRepoDefinition {
   id: string;
@@ -306,8 +407,12 @@ export interface LibraryRepoDefinition {
   releaseBranch?: string;
 }
 
+export const libraryRepoSources = ["configured", "registered", "discovered", "saved"] as const;
+
+export type LibraryRepoSource = (typeof libraryRepoSources)[number];
+
 export interface SavedLibraryRepoDefinition extends LibraryRepoDefinition {
-  source?: "configured" | "discovered" | "saved";
+  source?: LibraryRepoSource;
   commitAuthorName?: string;
   commitAuthorEmail?: string;
 }
@@ -330,6 +435,7 @@ export interface RepoContextSummary {
   repoRoot: string;
   dataRoot: string;
   isDefault: boolean;
+  source?: Extract<LibraryRepoSource, "configured" | "registered" | "discovered">;
   releaseBranch?: string;
 }
 
@@ -404,4 +510,64 @@ export interface LibraryRepoTestResponse {
 export interface LibraryRepoDiscoveryResponse {
   libraryRoots: string[];
   repos: RepoContextSummary[];
+}
+
+export const repoPermissionRoles = ["viewer", "editor", "manage", "direct-publish"] as const;
+
+export type RepoPermissionRole = (typeof repoPermissionRoles)[number];
+
+export interface AuthenticatedGitHubUser {
+  id: number;
+  login: string;
+  displayName?: string;
+  avatarUrl?: string;
+}
+
+export interface RepoPermissionSummary {
+  repoId: string;
+  repoName: string;
+  roles: RepoPermissionRole[];
+  canEditDrafts: boolean;
+  canManage: boolean;
+  canDirectPublish: boolean;
+  sourceTeams: string[];
+  sourceOverride?: string;
+}
+
+export interface AuthSessionSummary {
+  sessionId: string;
+  user: AuthenticatedGitHubUser;
+  permissions: RepoPermissionSummary[];
+}
+
+export interface GitHubDeviceAuthorizationStartResponse {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  expiresInSeconds: number;
+  intervalSeconds: number;
+}
+
+export interface GitHubDeviceAuthorizationPollRequest {
+  deviceCode: string;
+}
+
+export interface GitHubDeviceAuthorizationPendingResponse {
+  status: "pending";
+  intervalSeconds: number;
+}
+
+export interface GitHubDeviceAuthorizationAuthorizedResponse {
+  status: "authorized";
+  session: AuthSessionSummary;
+}
+
+export type GitHubDeviceAuthorizationPollResponse =
+  | GitHubDeviceAuthorizationPendingResponse
+  | GitHubDeviceAuthorizationAuthorizedResponse;
+
+export interface AuthSessionResponse {
+  authenticated: boolean;
+  session?: AuthSessionSummary;
 }

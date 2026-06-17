@@ -20,6 +20,7 @@ export interface RepoContextResolverOptions {
   gitSyncRemoteUrl?: string;
   gitSyncReleaseBranch?: string;
   libraryRepoRoots?: string[];
+  libraryRepos?: LibraryRepoDefinition[];
 }
 
 export interface ResolvedRepoContext {
@@ -38,6 +39,7 @@ export class RepoContextResolver {
   private readonly gitSyncRemoteUrl: string | undefined;
   private readonly gitSyncReleaseBranch: string | undefined;
   private readonly libraryRepoRoots: string[];
+  private readonly registeredLibraryRepos: LibraryRepoDefinition[];
 
   public constructor(options: RepoContextResolverOptions) {
     this.defaultDataRoot = options.defaultDataRoot ? path.resolve(options.defaultDataRoot) : null;
@@ -46,6 +48,11 @@ export class RepoContextResolver {
     this.gitSyncRemoteUrl = options.gitSyncRemoteUrl?.trim() || undefined;
     this.gitSyncReleaseBranch = options.gitSyncReleaseBranch?.trim() || undefined;
     this.libraryRepoRoots = [...new Set((options.libraryRepoRoots ?? []).map((entry) => path.resolve(entry)))];
+    this.registeredLibraryRepos = [...new Map(
+      (options.libraryRepos ?? [])
+        .map((entry) => normalizeLibraryRepoDefinition(entry))
+        .map((entry) => [entry.repoRoot, entry] as const),
+    ).values()];
   }
 
   public getDefaultSummary(): RepoContextSummary | null {
@@ -61,6 +68,7 @@ export class RepoContextResolver {
       repoRoot: this.defaultRepoRoot,
       dataRoot: this.defaultDataRoot,
       isDefault: true,
+      source: "configured",
       releaseBranch,
     };
   }
@@ -69,12 +77,31 @@ export class RepoContextResolver {
     return [...this.libraryRepoRoots];
   }
 
+  public resolveLibraryCheckoutRoot(repoName: string): string {
+    const normalizedRepoName = normalizeLibraryCheckoutName(repoName);
+    const libraryRoot = this.libraryRepoRoots[0];
+    if (!libraryRoot) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        "Library repository onboarding is not available until Dacci is configured with at least one allowed library root.",
+      );
+    }
+
+    return path.join(libraryRoot, normalizedRepoName);
+  }
+
   public async discoverLibraryRepos(): Promise<RepoContextSummary[]> {
     const discoveredRepos = new Map<string, RepoContextSummary>();
 
+    for (const repo of this.registeredLibraryRepos) {
+      discoveredRepos.set(repo.repoRoot, this.buildRegisteredRepoSummary(repo));
+    }
+
     for (const rootPath of this.libraryRepoRoots) {
       for (const summary of await this.discoverLibraryReposInRoot(rootPath)) {
-        discoveredRepos.set(summary.repoRoot, summary);
+        if (!discoveredRepos.has(summary.repoRoot)) {
+          discoveredRepos.set(summary.repoRoot, summary);
+        }
       }
     }
 
@@ -116,6 +143,7 @@ export class RepoContextResolver {
         }
       }),
     );
+    await Promise.all(this.registeredLibraryRepos.map(async (repo) => this.validateRegisteredLibraryRepo(repo)));
   }
 
   public resolveRequestSelection(headerValue: string | string[] | undefined): ResolvedRepoContext {
@@ -149,8 +177,10 @@ export class RepoContextResolver {
     }
 
     const normalizedRepo = normalizeLibraryRepoDefinition(selection.repo);
-    const repoRoot = normalizedRepo.repoRoot;
-    const dataRoot = normalizedRepo.dataRoot ? normalizedRepo.dataRoot : path.join(repoRoot, "data");
+    const registeredRepo = this.findRegisteredLibraryRepo(normalizedRepo);
+    const effectiveRepo = registeredRepo ?? normalizedRepo;
+    const repoRoot = effectiveRepo.repoRoot;
+    const dataRoot = effectiveRepo.dataRoot ? effectiveRepo.dataRoot : path.join(repoRoot, "data");
     ensurePathInside(repoRoot, dataRoot, "Content root");
 
     const defaultSummary = this.getDefaultSummary();
@@ -159,7 +189,7 @@ export class RepoContextResolver {
       repoRoot === this.defaultRepoRoot &&
       dataRoot === this.defaultDataRoot;
     const persistedReleaseBranch =
-      normalizedRepo.releaseBranch ||
+      effectiveRepo.releaseBranch ||
       (!defaultRepoSelection && this.isRepoRootAllowed(repoRoot)
         ? readPersistedScheduleReleaseBranch({
             isDefault: false,
@@ -185,22 +215,27 @@ export class RepoContextResolver {
     if (!this.isRepoRootAllowed(repoRoot)) {
       throw new GitHubSyncError(
         "invalid_configuration",
-        this.libraryRepoRoots.length > 0
-          ? `Repository root '${repoRoot}' is outside the configured library roots.`
-          : "Custom library repositories are not available in this runtime until Dacci is configured with allowed library roots.",
+        this.libraryRepoRoots.length > 0 || this.registeredLibraryRepos.length > 0
+          ? `Repository root '${repoRoot}' is outside the configured library registry and allowed roots.`
+          : "Custom library repositories are not available in this runtime until Dacci is configured with allowed library repos or roots.",
       );
     }
 
+    const summary: RepoContextSummary = {
+      id: effectiveRepo.id,
+      kind: "library",
+      name: buildResolvedRepoName(repoRoot, effectiveRepo.name, undefined, this.gitSyncRemoteName),
+      repoRoot,
+      dataRoot,
+      isDefault: false,
+      releaseBranch,
+    };
+    if (registeredRepo) {
+      summary.source = "registered";
+    }
+
     return this.createContext({
-      summary: {
-        id: normalizedRepo.id,
-        kind: "library",
-        name: buildResolvedRepoName(repoRoot, normalizedRepo.name, undefined, this.gitSyncRemoteName),
-        repoRoot,
-        dataRoot,
-        isDefault: false,
-        releaseBranch,
-      },
+      summary,
       repoRoot,
       dataRoot,
       isDefault: false,
@@ -245,7 +280,8 @@ export class RepoContextResolver {
   }
 
   private isRepoRootAllowed(repoRoot: string): boolean {
-    return this.libraryRepoRoots.some((rootPath) => isSameOrInside(rootPath, repoRoot));
+    return this.registeredLibraryRepos.some((repo) => repo.repoRoot === repoRoot)
+      || this.libraryRepoRoots.some((rootPath) => isSameOrInside(rootPath, repoRoot));
   }
 
   private async discoverLibraryReposInRoot(rootPath: string): Promise<RepoContextSummary[]> {
@@ -287,17 +323,87 @@ export class RepoContextResolver {
     }
 
     try {
-      return this.resolveLibraryRepo({
+      const summary = this.resolveLibraryRepo({
         id: buildDiscoveredRepoId(repoRoot),
         name: buildRepoRootFallbackName(repoRoot),
         repoRoot,
       }).summary;
+      if (!summary.isDefault) {
+        summary.source = "discovered";
+      }
+      return summary;
     } catch (error) {
       if (error instanceof GitHubSyncError && error.code === "invalid_configuration") {
         return null;
       }
 
       throw error;
+    }
+  }
+
+  private findRegisteredLibraryRepo(repo: LibraryRepoDefinition): LibraryRepoDefinition | undefined {
+    return this.registeredLibraryRepos.find(
+      (candidate) => candidate.id === repo.id || candidate.repoRoot === repo.repoRoot,
+    );
+  }
+
+  private buildRegisteredRepoSummary(repo: LibraryRepoDefinition): RepoContextSummary {
+    const dataRoot = repo.dataRoot ? repo.dataRoot : path.join(repo.repoRoot, "data");
+    const releaseBranch = resolveReleaseBranch(repo.releaseBranch, this.gitSyncReleaseBranch);
+    return {
+      id: repo.id,
+      kind: "library",
+      name: buildResolvedRepoName(repo.repoRoot, repo.name, undefined, this.gitSyncRemoteName),
+      repoRoot: repo.repoRoot,
+      dataRoot,
+      isDefault: false,
+      source: "registered",
+      releaseBranch,
+    };
+  }
+
+  private async validateRegisteredLibraryRepo(repo: LibraryRepoDefinition): Promise<void> {
+    const dataRoot = repo.dataRoot ? repo.dataRoot : path.join(repo.repoRoot, "data");
+    ensurePathInside(repo.repoRoot, dataRoot, "Content root");
+
+    let repoRootStats;
+    try {
+      repoRootStats = await stat(repo.repoRoot);
+    } catch {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Registered repository root '${repo.repoRoot}' does not exist or is not accessible.`,
+      );
+    }
+    if (!repoRootStats.isDirectory()) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Registered repository root '${repo.repoRoot}' must be a directory.`,
+      );
+    }
+
+    const gitConfigPath = resolveGitConfigPath(repo.repoRoot);
+    if (!gitConfigPath || !(await isFilePath(gitConfigPath))) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Registered repository root '${repo.repoRoot}' is not a Git checkout Dacci can use.`,
+      );
+    }
+
+    let dataRootStats;
+    try {
+      dataRootStats = await stat(dataRoot);
+    } catch {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Registered content root '${dataRoot}' does not exist or is not accessible.`,
+      );
+    }
+    if (!dataRootStats.isDirectory()) {
+      throw new GitHubSyncError(
+        "invalid_configuration",
+        `Registered content root '${dataRoot}' must be a directory.`,
+      );
     }
   }
 }
@@ -321,6 +427,32 @@ export function parseConfiguredLibraryRoots(
 
   const defaultParent = path.dirname(path.resolve(defaultRepoRoot));
   return defaultParent !== path.parse(defaultParent).root ? [defaultParent] : [];
+}
+
+export function parseConfiguredLibraryRepos(configuredValue?: string): LibraryRepoDefinition[] {
+  const normalizedValue = configuredValue?.trim();
+  if (!normalizedValue) {
+    return [];
+  }
+
+  let parsedValue: unknown;
+  try {
+    parsedValue = JSON.parse(normalizedValue);
+  } catch {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      "DACCI_LIBRARY_REPOS must be valid JSON.",
+    );
+  }
+
+  if (!Array.isArray(parsedValue)) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      "DACCI_LIBRARY_REPOS must be a JSON array of repository definitions.",
+    );
+  }
+
+  return parsedValue.map((entry) => normalizeLibraryRepoDefinition(entry as Record<string, unknown>));
 }
 
 export function parseRepoSelectionHeader(
@@ -414,6 +546,18 @@ function normalizeRequiredString(value: unknown, label: string): string {
   }
 
   return trimmedValue;
+}
+
+function normalizeLibraryCheckoutName(value: unknown): string {
+  const normalizedValue = normalizeRequiredString(value, "Library repository checkout name");
+  if (!/^[A-Za-z0-9_.-]+$/.test(normalizedValue)) {
+    throw new GitHubSyncError(
+      "invalid_configuration",
+      `Library repository checkout name '${normalizedValue}' must use letters, numbers, '.', '_' or '-'.`,
+    );
+  }
+
+  return normalizedValue;
 }
 
 function normalizeAbsolutePath(value: unknown, label: string): string {

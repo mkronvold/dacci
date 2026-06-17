@@ -119,9 +119,11 @@ Storage notes:
 | --- | --- |
 | Reading | Rendered Markdown reader with heading outline, tag pills, and Mermaid support |
 | Editing | Explicit view/edit mode with document save, rename, move, and delete |
+| Status-first docs lifecycle | New backend and browser support for `draft/`, `published/`, and `archive/` folder variants, including draft creation, published-to-draft edits, stale-save conflict detection, publish promotion, and archiving |
 | Search | Path, name, body, and optional tag search through one API-driven flow |
 | Import | Markdown files, directories, JSON bundles, and ZIP archives |
 | Export | Markdown for single documents, JSON bundles, and ZIP archives |
+| Multi-user auth foundation | New GitHub device-flow session endpoints, repo permission evaluation from GitHub teams and Dacci overrides, and an initial browser docs workspace that uses those sessions |
 | Sync | Guarded Git status, pull, push, and optional background pull scheduling |
 | Packaging | Multi-stage Docker images and archived Kubernetes manifests |
 
@@ -134,6 +136,8 @@ Key endpoints:
 | Service | `GET /health`, `GET /ready`, `GET /api` |
 | Discovery | `GET /api/tree`, `GET /api/summary`, `GET /api/search` |
 | Library | `GET /api/library/discover`, `POST /api/library/test`, `POST /api/library/adopt-remote`, `POST /api/library/create` |
+| Auth | `GET /api/auth/session`, `POST /api/auth/github/device/start`, `POST /api/auth/github/device/poll`, `POST /api/auth/session/logout` |
+| Status-first docs | `GET /api/docs/tree`, `GET /api/docs/documents`, `POST /api/docs/documents`, `PUT /api/docs/documents/draft`, `PUT /api/docs/documents/published`, `POST /api/docs/documents/publish`, `POST /api/docs/documents/archive`, `DELETE /api/docs/documents/archive` |
 | Documents | `GET /api/documents`, `POST /api/documents`, `PUT /api/documents` |
 | Structure | topic and subtopic create, rename, and delete routes |
 | Transfer | `POST /api/import/documents`, `POST /api/export` |
@@ -165,6 +169,17 @@ The active packaged-runtime target is a localhost-only Docker stack that uses no
 - pull, push, and refresh use the same SSH remotes and host SSH setup that already work on your machine
 
 Before using the packaged runtime, make sure the host content checkout can already talk to its remote with normal SSH Git commands. See `docs/DOCKER.md` and `docs/OPERATORS.md` for the runtime details.
+
+### Multi-user runtime configuration
+
+The new multi-user slices are opt-in. They now include an initial browser workspace on top of the new API routes, but the broader product migration is still in progress:
+
+- `DACCI_LIBRARY_REPOS` — JSON array of explicitly allowed repository definitions with `id`, `name`, `repoRoot`, and optional `dataRoot` and `releaseBranch`
+- `DACCI_GITHUB_DEVICE_CLIENT_ID` — GitHub OAuth app client id for `github.com/login/device`
+- `DACCI_GITHUB_TEAM_ROLE_BINDINGS` — JSON array mapping GitHub org/team membership to repo roles such as `manage` or `direct-publish`
+- `DACCI_GITHUB_REPO_ROLE_OVERRIDES` — JSON array of per-repo username overrides for repo roles
+
+If `DACCI_GITHUB_DEVICE_CLIENT_ID` is set, the new `/api/docs/*` routes require a Dacci auth session from the device-flow endpoints. The web app now includes an initial multi-user docs pane that signs in through device flow, shows repo permissions, browses logical docs by lifecycle state, and performs draft, publish, archive, and archive-delete actions against those routes.
 
 ## Documentation map
 
@@ -213,6 +228,7 @@ Content repos normally live under this repo's gitignored `workspace/` directory.
 ## Current constraints
 
 - the Git-backed workspace is still single-writer by design
+- the new multi-user docs pane still operates against local repo checkouts managed by the current API runtime, not direct GitHub API reads and writes
 - background sync is pull-only, per-repo, and disabled by default
-- distributed write coordination is not implemented
+- distributed write coordination is still partial; per-repo mutation serialization and stale-save detection exist, but PR-mediated promotion and richer merge handling are still future work
 - advanced production platform integrations remain future work

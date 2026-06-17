@@ -33,7 +33,7 @@ interface LibraryPaneProps {
     commitAuthorEmail: string;
     commitAuthorName: string;
     id: string | null;
-    source: "configured" | "discovered" | "saved" | null;
+    source: "configured" | "registered" | "discovered" | "saved" | null;
     name: string;
     repoRoot: string;
     dataRoot: string;
@@ -117,6 +117,7 @@ export function LibraryPane(props: LibraryPaneProps) {
   const renderRepoList = (repos: SavedLibraryRepoDefinition[]) =>
     repos.map((repo) => {
       const configuredRepo = repo.source === "configured";
+      const registeredRepo = repo.source === "registered";
       const discoveredRepo = repo.source === "discovered";
       const browserSavedRepo = isBrowserSavedLibraryRepo(repo);
 
@@ -139,6 +140,8 @@ export function LibraryPane(props: LibraryPaneProps) {
               <p className="muted">Saved in this browser.</p>
             ) : configuredRepo ? (
               <p className="muted">Provided by the running Dacci backend.</p>
+            ) : registeredRepo ? (
+              <p className="muted">Allowed by the Dacci repo registry.</p>
             ) : discoveredRepo ? (
               <p className="muted">Discovered from the current Dacci workspace.</p>
             ) : null}
@@ -232,8 +235,8 @@ export function LibraryPane(props: LibraryPaneProps) {
                   <div className="library-repo-group">
                     <h4>Available from this Dacci runtime</h4>
                     <p className="muted">
-                      These entries come from the running backend or current workspace. Save an override below if you
-                      want browser-local edits, export, or removal.
+                      These entries come from the running backend, repo registry, or current workspace. Save an
+                      override below if you want browser-local edits, export, or removal.
                     </p>
                     {renderRepoList(runtimeRepos)}
                   </div>
@@ -259,6 +262,10 @@ export function LibraryPane(props: LibraryPaneProps) {
           ) : props.form.source === "discovered" ? (
             <p className="muted">
               This repository was discovered from the current workspace. Save changes here to keep a browser-local override.
+            </p>
+          ) : props.form.source === "registered" ? (
+            <p className="muted">
+              This repository is managed by the Dacci repo registry. Save changes here to keep a browser-local override.
             </p>
           ) : null}
           <div className="form-grid">

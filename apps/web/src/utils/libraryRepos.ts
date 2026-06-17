@@ -95,7 +95,7 @@ export function createDiscoveredLibraryRepo(summary: RepoContextSummary): SavedL
     id: summary.id,
     name: summary.name.trim() || "Discovered repository",
     repoRoot: summary.repoRoot,
-    source: summary.isDefault ? "configured" : "discovered",
+    source: summary.isDefault ? "configured" : summary.source === "registered" ? "registered" : "discovered",
   };
   if (summary.dataRoot) {
     discoveredRepo.dataRoot = summary.dataRoot;
@@ -162,8 +162,12 @@ export function isDiscoveredLibraryRepo(repo: SavedLibraryRepoDefinition): boole
   return repo.source === "discovered";
 }
 
+export function isRegisteredLibraryRepo(repo: SavedLibraryRepoDefinition): boolean {
+  return repo.source === "registered";
+}
+
 export function isBrowserSavedLibraryRepo(repo: SavedLibraryRepoDefinition): boolean {
-  return !isConfiguredLibraryRepo(repo) && !isDiscoveredLibraryRepo(repo);
+  return !isConfiguredLibraryRepo(repo) && !isDiscoveredLibraryRepo(repo) && !isRegisteredLibraryRepo(repo);
 }
 
 export function filterBrowserSavedLibraryRepos(entries: SavedLibraryRepoDefinition[]): SavedLibraryRepoDefinition[] {
@@ -223,7 +227,7 @@ function parseSavedLibraryRepoDefinition(value: unknown): SavedLibraryRepoDefini
       ? candidate.commitAuthorEmail.trim()
       : undefined;
   const source =
-    candidate.source === "configured" || candidate.source === "discovered" || candidate.source === "saved"
+    candidate.source === "configured" || candidate.source === "registered" || candidate.source === "discovered" || candidate.source === "saved"
       ? candidate.source
       : undefined;
 
@@ -290,7 +294,9 @@ function mergeRuntimeLibraryRepos(
   entries: SavedLibraryRepoDefinition[],
   runtimeRepos: SavedLibraryRepoDefinition[],
 ): SavedLibraryRepoDefinition[] {
-  let nextEntries = entries.filter((entry) => entry.source !== "configured" && entry.source !== "discovered");
+  let nextEntries = entries.filter(
+    (entry) => entry.source !== "configured" && entry.source !== "registered" && entry.source !== "discovered",
+  );
 
   for (const runtimeRepo of runtimeRepos) {
     const matchingEntry = entries.find((entry) => libraryReposReferToSameCheckout(entry, runtimeRepo));
@@ -336,6 +342,13 @@ function mergeRuntimeLibraryRepo(
     return {
       ...runtimeRepo,
       source: "configured",
+    };
+  }
+
+  if (isRegisteredLibraryRepo(runtimeRepo)) {
+    return {
+      ...runtimeRepo,
+      source: "registered",
     };
   }
 

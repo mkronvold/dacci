@@ -31,6 +31,8 @@ import {
   ZipArchiveExportResponse,
 } from "@dacci/shared-types";
 
+export * from "./docsLibraryEngine.js";
+
 const CATCH_ALL_SUBTOPIC_NAME = "CatchAll";
 const GITKEEP_FILE_NAME = ".gitkeep";
 
